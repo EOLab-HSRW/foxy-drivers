@@ -1,5 +1,5 @@
-#ifndef FOXY_H_INCLUDED
-#define FOXY_H_INCLUDED
+#ifndef __FOXY_HPP__
+#define __FOXY_HPP__
 
 
 /*
@@ -77,67 +77,10 @@ typedef enum {
     HAT_V3_15     = 1,
 } hat_t;
 
-typedef enum {
-    ENDPOINT_ROLE_NONE = 0,
-    ENDPOINT_ROLE_IRQ,
-    ENDPOINT_ROLE_RESET,
-    ENDPOINT_ROLE_ENABLE,
-    ENDPOINT_ROLE_AUX0,
-    ENDPOINT_ROLE_AUX1,
-} endpoint_role_t;
 
-typedef enum {
-    IFACE_NONE = 0,
-    IFACE_I2C  = 1,
-    IFACE_SPI  = 2,
-    IFACE_UART = 3,
-    IFACE_GPIO = 4,
-    IFACE_PWM  = 5,
-    IFACE_USB  = 6,
-    IFACE_V4L2 = 7,
-    IFACE_CSI  = 8,
-} peripheral_iface_t;
-
-typedef union {
-    struct { const char *adapter; uint16_t addr;                            } i2c;  // e.g. adapter="/dev/i2c-1", addr=0x3C
-    struct { const char *dev;     uint32_t hz;        uint8_t mode;         } spi;  // e.g. dev="/dev/spidev0.0"
-    struct { const char *dev;     uint32_t baud;                            } uart; // e.g. dev="/dev/ttyAMA0"
-    struct { gpio_desc_t line;                                              } gpio; // gpiochipN + offset (line)
-    struct { const char *chip;    uint32_t channel;   uint32_t period_ns;   } pwm;
-    struct { uint16_t vid, pid;   const char *serial; uint8_t interface_no; } usb;
-    struct { const char *dev;                                               } v4l2;
-    struct { uint8_t port;        uint8_t lanes;                            } csi;
-} endpoint_u_t;
-
-typedef struct {
-    endpoint_role_t role;
-    peripheral_iface_t iface;
-    endpoint_u_t u;
-} peripheral_aux_t;
-
-#define PERIPH_MAX_AUX 2
-
-/**
- * Single peripheral description.
- *
- * The idea: this is *metadata* the rest the
- * stack can use to bind to the right driver
- * and OS resources.
- */
-typedef struct {
-    peripheral_type_t type;
-    const char *name;   // this name is a human readable "label": "display0", "imu0", ...
-    const char *driver; // bind hint: "ssd1306", ... (optional)
-    uint32_t flags;     // peripheral_flags_t
-
-    peripheral_primary_t primary;
-
-    uint8_t num_aux;
-    peripheral_aux_t aux[PERIPH_MAX_AUX];
-
-    const peripheral_kv_t *props; // optional
-    uint16_t num_props;
-} peripheral_desc_t;
+struct peripheral_desc;
+typedef struct peripheral_desc peripheral_desc_t;
+typedef struct peripheral_driver peripheral_driver_t;
 
 
 /**
@@ -535,7 +478,7 @@ static int platform_detect(platform_t *out, char *human, size_t humansz)
  * enum peripheral_type - Robot peripheral clases.
  */
 typedef enum {
-    PERIPH_NONE       = 0,
+    PERIPH_NON        = 0,
     PERIPH_BATTERY    = 1,
     PERIPH_MOTOR      = 2,
     PERIPH_ENCODER    = 3,
@@ -1651,24 +1594,21 @@ int vl53l0x_set_signal_rate_limit_mcps(int fd, float mcps) {
 
 typedef struct peripheral_driver peripheral_driver_t;
 
-// [DISABLE]
-// // binding slot: this is always 1:1 with def->peripherals[i]
-// typedef struct {
-//     const peripheral_driver_t *driver;
-//     void *ctx;  // NULL if not bound
-//     uint16_t refs; // refcount per process
-// } robot_slot_t;
+// binding slot: this is always 1:1 with def->peripherals[i]
+typedef struct {
+    const peripheral_driver_t *driver;
+    void *ctx;  // NULL if not bound
+    uint16_t refs; // refcount per process
+} robot_slot_t;
 
-// [DISABLE]
-// typedef struct {
-//     int error; // 0 if the robot is OK,else negative errno-style
-//     const robot_def_t *def; // detected robot definition
-//     robot_slot_t slots[ROBOT_MAX_PERIPHERALS];
-//     size_t nslots;
-// } robot_t;
+typedef struct {
+    int error; // 0 if the robot is OK,else negative errno-style
+    const robot_def_t *def; // detected robot definition
+    robot_slot_t slots[ROBOT_MAX_PERIPHERALS];
+    size_t nslots;
+} robot_t;
 
-// [DISABLE]
-// static inline int robot_ok(const robot_t *r) { return r && r->error == 0; }
+static inline int robot_ok(const robot_t *r) { return r && r->error == 0; }
 
 
 
@@ -1719,7 +1659,7 @@ static size_t robot_count_type(const robot_t *r, peripheral_type_t type) {
     return n;
 }
 
-static void robot_warn_ambiguous_type(const robot_t *r,
+static void robot_warm_ambiguous_type(const robot_t *r,
                                       peripheral_type_t type,
                                       const char *api_name,
                                       const char *matching_name) {
@@ -1744,7 +1684,7 @@ static int robot_find_index(const robot_t *r,
         for (size_t i = 0; i < r->def->num_peripherals; i++) {
             if (r->def->peripherals[i].type == type) {
                 *out_idx = (uint16_t)i;
-                robot_warn_ambiguous_type(r, type, api_name, r->def->peripherals[i].name);
+                robot_warm_ambiguous_type(r, type, api_name, r->def->peripherals[i].name);
                 return 0;
             }
         }
@@ -2017,13 +1957,12 @@ typedef struct {
     mpu6050_t dev;
 } mpu6050_imu_ctx_t;
 
-// [DISABLE]
-// typedef struct { 
-//     float accel_ms2[3]; // ax, ay, az
-//     float gyro_dps[3];  // gx, gy, gz
-//     float mag_uT[3];    // mx, my, my (zero if the given imu does not have it)
-//     float temp_c;
-// } imu_sample_t;
+typedef struct { 
+    float accel_ms2[3]; // ax, ay, az
+    float gyro_dps[3];  // gx, gy, gz
+    float mag_uT[3];    // mx, my, my (zero if the given imu does not have it)
+    float temp_c;
+} imu_sample_t;
 
 static int imu_mpu6050_read(void *p, imu_sample_t *out) {
     if (!p || !out) return -EINVAL;
@@ -2108,7 +2047,7 @@ static int imu_mpu6050_bind(const peripheral_desc_t *desc, void **out_ctx) {
     return 0;
 }
 
-static void imu_mpu6050_unbind(void *p) {
+static void imu_mpu6050_umbind(void *p) {
     mpu6050_imu_ctx_t *ctx = (mpu6050_imu_ctx_t *)p;
     if (!ctx) return;
     if (ctx->fd >= 0) close(ctx->fd);
@@ -2505,13 +2444,12 @@ static void motor_hbridge_unbind(void *p) {
 // ========================================================================================
 
 
-// [DISABLE]
-// // Unified resource handle
-// typedef struct {
-//     const void *ops;
-//     void *ctx;
-//     uint16_t _idx; // slot index
-// } resource_t;
+// Unified resource handle
+typedef struct {
+    const void *ops;
+    void *ctx;
+    uint16_t _idx; // slot index
+} resource_t;
 
 
 //------------------------------------------------------
@@ -2635,19 +2573,19 @@ static const motor_ops_t motor_hbridge_ops = {
     .brake = motor_hbridge_brake,
 };
 
-int motor_set(motor_t m, float power) {
+static inline int motor_set(motor_t m, float power) {
     const motor_ops_t *ops = (const motor_ops_t *)m.ops;
     if (!ops || !ops->set || !m.ctx) return -ENODEV;
     return ops->set(m.ctx, power);
 }
 
-int motor_stop(motor_t m) {
+static inline int motor_stop(motor_t m) {
     const motor_ops_t *ops = (const motor_ops_t *)m.ops;
     if (!ops || !ops->stop || !m.ctx) return -ENODEV;
     return ops->stop(m.ctx);
 }
 
-int motor_brake(motor_t m) {
+static inline int motor_brake(motor_t m) {
     const motor_ops_t *ops = (const motor_ops_t *)m.ops;
     if (!ops || !m.ctx) return -ENODEV;
     if (ops->brake) return ops->brake(m.ctx);
@@ -2717,7 +2655,7 @@ void motor_deinit(robot_t *r, motor_t *m) {
 
 static const peripheral_driver_t global_drivers[] = {
     { .name="pca9685", .type=PERIPH_LED, .bind=led_pca9685_bind, .unbind=led_pca9685_unbind, .ops=&led_pca9685_ops },
-    { .name="mpu6050", .type=PERIPH_IMU, .bind=imu_mpu6050_bind, .unbind=imu_mpu6050_unbind, .ops=&imu_mpu6050_ops },
+    { .name="mpu6050", .type=PERIPH_IMU, .bind=imu_mpu6050_bind, .unbind=imu_mpu6050_umbind, .ops=&imu_mpu6050_ops },
     { .name="gpio", .type=PERIPH_GPIO, .bind=gpiochip_line_bind, .unbind=gpiochip_line_unbind, .ops=&gpiochip_line_ops },
     { .name="motor_hbridge", .type=PERIPH_MOTOR, .bind=motor_hbridge_bind, .unbind=motor_hbridge_unbind, .ops=&motor_hbridge_ops },
 };
@@ -2727,4 +2665,4 @@ static const size_t global_num_drivers = sizeof(global_drivers)/sizeof(global_dr
 }
 #endif
 #endif // FOXY_IMPLEMENTATION
-#endif // FOXY_H_INCLUDED
+#endif // __FOXY_HPP__
