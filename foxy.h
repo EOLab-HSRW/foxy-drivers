@@ -1,9 +1,14 @@
+#ifndef __FOXY_HPP__
+#define __FOXY_HPP__
+
+
 /*
  * Build:
  *   gcc -std=c11 -Wall -Wextra -O2 system.c -o systm -lm
  *
  *
  * Organization:
+ * - Public API forward declaration
  * - Small helper for platform introspection
  * - Platform, model and Hat functions (platform_t)
  * - peripherals denitions, errors code and helpers (peripheral_desc_t)
@@ -39,6 +44,151 @@
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
 #include <linux/gpio.h>
+
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void sleep_ms(unsigned ms);
+
+
+/**
+ * High-level platform family.
+ */
+typedef enum {
+  PLATFORM_UNKNOWN   = 0,
+  PLATFORM_JETSON    = 1,
+  PLATFORM_RASPBERRY = 2,
+} platform_family_t;
+
+/**
+ * Robot HAT (Hardware Attached on Top) revision.
+ * @HAT_UNKNOWN: Unknown or not detected.
+ * @HAT_V3_15: HAT revision v3.15.
+ *
+ * The HAT defines the "physical hardware contract" for peripheral
+ * connections (IMU, buttons, LEDs, etc.). This enum tracks hardware
+ * revisions to ensure correct pinmuxing and peripheral routing.
+ */
+typedef enum {
+	HAT_UNKNOWN   = 0,
+    HAT_V3_15     = 1,
+} hat_t;
+
+
+struct peripheral_desc;
+typedef struct peripheral_desc peripheral_desc_t;
+typedef struct peripheral_driver peripheral_driver_t;
+
+
+/**
+ * struct robot_def - Full robot description
+ */
+typedef struct {
+    uint32_t key;
+    const char *id;
+    const char *display_name;
+
+    platform_family_t platform_family;
+    uint16_t platform_model;
+    hat_t hat;
+
+    const peripheral_desc_t *peripherals;
+    size_t num_peripherals;
+
+} robot_def_t;
+
+typedef struct {
+    const peripheral_driver_t *driver;
+    void *ctx;
+    uint16_t refs;
+} robot_slot_t;
+
+// Harley: any assumption in software development is usually wrong,
+// but let's allow ourselves to be wrong this time, since this small
+// "foxy robot" wouldn't have more peripheral than this.
+//
+// If that's not the case, and the robot has a large a number of peripherals attached,
+// the fundamental principle of simplicity and minimalism that drive the philosophy of this
+// driver are broken at their core. In that situation, a different approach should be consider
+// instead of extending this one to the point where it becomes fragile and unmaintainable.
+//
+// Therefore, consider this number a complexity cealing that ideally should not be exceeded,
+// and if it is exceeded, that's is a good sign that it's time to rethink the approach.
+// In the best-case scenario, this number should increase only if it isn't accompanied
+// by additional code.
+#define ROBOT_MAX_PERIPHERALS 32
+
+typedef struct {
+    int error;
+    const robot_def_t *def;   /* if you want robot_def_t public too, expose it; otherwise forward-declare it */
+    robot_slot_t slots[ROBOT_MAX_PERIPHERALS];
+    size_t nslots;
+} robot_t;
+
+/* resources, imu_sample_t, etc... (whatever your API needs) */
+typedef struct {
+    const void *ops;
+    void *ctx;
+    uint16_t _idx;
+} resource_t;
+
+typedef resource_t led_t;
+typedef resource_t imu_t;
+typedef resource_t gpio_t;
+typedef resource_t motor_t;
+
+typedef struct {
+    float accel_ms2[3];
+    float gyro_dps[3];
+    float mag_uT[3];
+    float temp_c;
+} imu_sample_t;
+
+/* ====== PUBLIC API PROTOTYPES ONLY ====== */
+
+robot_t robot_init(void);
+void    robot_deinit(robot_t *r);
+
+/* if you want this callable without exporting a symbol: */
+static inline int robot_ok(const robot_t *r) { return r && r->error == 0; }
+void robot_def_dump(const robot_def_t *def, void *out);
+
+led_t   led_init_name(robot_t *r, const char *name);
+void    led_deinit(robot_t *r, led_t *h);
+int     led_set_rgb(led_t led, uint8_t idx, uint8_t r, uint8_t g, uint8_t b);
+
+imu_t        imu_init_name(robot_t *r, const char *name);
+void         imu_deinit(robot_t *r, imu_t *h);
+imu_sample_t imu_read(imu_t imu);
+
+gpio_t gpio_init_name(robot_t *r, const char *name);
+void   gpio_deinit(robot_t *r, gpio_t *h);
+int    gpio_set_as_input(gpio_t g);
+int    gpio_set_as_output(gpio_t g);
+int    gpio_read(gpio_t g);
+int    gpio_write(gpio_t g, int value);
+
+motor_t motor_init_name(robot_t *r, const char *name);
+void    motor_deinit(robot_t *r, motor_t *m);
+int     motor_set(motor_t m, float power);
+int     motor_stop(motor_t m);
+int     motor_brake(motor_t m);
+
+
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
+
+
+#ifdef FOXY_IMPLEMENTATION
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 // ========================================================================================
 // SMALL HELPERS - String, File, and Utility functions for platform identification
@@ -190,14 +340,6 @@ static int dt_compatible_contains(const char *needle) {
 // PLATFORM - Denitions and Detections
 // ========================================================================================
 
-/**
- * High-level platform family.
- */
-typedef enum {
-	PLATFORM_UNKNOWN   = 0,
-	PLATFORM_JETSON    = 1,
-	PLATFORM_RASPBERRY = 2,
-} platform_family_t;
 
 static const char *family_to_string(platform_family_t f) {
     switch (f) {
@@ -326,19 +468,6 @@ static int platform_detect(platform_t *out, char *human, size_t humansz)
     return -1;
 }
 
-/**
- * Robot HAT (Hardware Attached on Top) revision.
- * @HAT_UNKNOWN: Unknown or not detected.
- * @HAT_V3_15: HAT revision v3.15.
- *
- * The HAT defines the "physical hardware contract" for peripheral
- * connections (IMU, buttons, LEDs, etc.). This enum tracks hardware
- * revisions to ensure correct pinmuxing and peripheral routing.
- */
-typedef enum {
-	HAT_UNKNOWN   = 0,
-    HAT_V3_15     = 1,
-} hat_t;
 
 
 // ========================================================================================
@@ -524,36 +653,6 @@ typedef struct {
 #define PRI_CSI(_port, _lanes) \
     (peripheral_primary_t){.iface=IFACE_CSI, .u.csi={.port=(_port), .lanes=(_lanes) } }
 
-// for optional aux endpoints, unique roles, driver(s) may use or ignore.
-typedef struct {
-    endpoint_role_t role;
-    peripheral_iface_t iface;
-    endpoint_u_t u;
-} peripheral_aux_t;
-
-#define PERIPH_MAX_AUX 2
-
-/**
- * Single peripheral description.
- *
- * The idea: this is *metadata* the rest the
- * stack can use to bind to the right driver
- * and OS resources.
- */
-typedef struct {
-    peripheral_type_t type;
-    const char *name;   // this name is a human readable "label": "display0", "imu0", ...
-    const char *driver; // bind hint: "ssd1306", ... (optional)
-    uint32_t flags;     // peripheral_flags_t
-
-    peripheral_primary_t primary;
-
-    uint8_t num_aux;
-    peripheral_aux_t aux[PERIPH_MAX_AUX];
-
-    const peripheral_kv_t *props; // optional
-    uint16_t num_props;
-} peripheral_desc_t;
 
 
 static const peripheral_aux_t *peripheral_get_aux(const peripheral_desc_t *d, endpoint_role_t role) {
@@ -678,22 +777,6 @@ static inline uint32_t robot_def_key(platform_family_t platform, uint16_t model,
     return ROBOT_DEF_KEY(platform, model, hat);
 }
 
-/**
- * struct robot_def - Full robot description
- */
-typedef struct {
-    uint32_t key;
-    const char *id;
-    const char *display_name;
-
-    platform_family_t platform_family;
-    uint16_t platform_model;
-    hat_t hat;
-
-    const peripheral_desc_t *peripherals;
-    size_t num_peripherals;
-
-} robot_def_t;
 
 static const peripheral_kv_t leds_props[] = {
     { "pwm_hz", "1000" },
@@ -1072,7 +1155,7 @@ static uint64_t mono_ms(void) {
     return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
 }
 
-static void sleep_ms(unsigned ms) {
+void sleep_ms(unsigned ms) {
     struct timespec ts;
     ts.tv_sec = (time_t)(ms / 1000);
     ts.tv_nsec = (long)((ms % 1000) * 1000000UL);
@@ -1505,23 +1588,6 @@ int vl53l0x_set_signal_rate_limit_mcps(int fd, float mcps) {
  * RUNTIME: Robot API
  */
 // ========================================================================================
-
-// Harley: any assumption in software development is usually wrong,
-// but let's allow ourselves to be wrong this time, since this small
-// "foxy robot" wouldn't have more peripheral than this.
-//
-// If that's not the case, and the robot has a large a number of peripherals attached,
-// the fundamental principle of simplicity and minimalism that drive the philosophy of this
-// driver are broken at their core. In that situation, a different approach should be consider
-// instead of extending this one to the point where it becomes fragile and unmaintainable.
-//
-// Therefore, consider this number a complexity cealing that ideally should not be exceeded,
-// and if it is exceeded, that's is a good sign that it's time to rethink the approach.
-// In the best-case scenario, this number should increase only if it isn't accompanied
-// by additional code.
-#define ROBOT_MAX_PERIPHERALS 32
-
-
 
 
 
@@ -2585,13 +2651,7 @@ void motor_deinit(robot_t *r, motor_t *m) {
     resource_close(r, m);
 }
 
-
-
-
-
 // ======================= DRIVERS REGISTRY =======================
-
-
 
 static const peripheral_driver_t global_drivers[] = {
     { .name="pca9685", .type=PERIPH_LED, .bind=led_pca9685_bind, .unbind=led_pca9685_unbind, .ops=&led_pca9685_ops },
@@ -2601,89 +2661,8 @@ static const peripheral_driver_t global_drivers[] = {
 };
 static const size_t global_num_drivers = sizeof(global_drivers)/sizeof(global_drivers[0]);
 
-int main(void) {
-
-    robot_t robot = robot_init();
-
-    if (!robot_ok(&robot)) {
-        // TODO: add message
-        // fail to init robot
-        return 1;
-    }
-
-    robot_def_dump(robot.def, stdout);
-
-    led_t leds = led_init_name(&robot, "leds_front_and_rear");
-    if (!leds.ctx) {
-        // TODO: add message
-        // fail to init led driver
-        robot_deinit(&robot);
-        return 1;
-    }
-
-    for (uint8_t i = 0; i < 4; i++) {
-        led_set_rgb(leds, i, 255, 0, 0); sleep_ms(100);
-        led_set_rgb(leds, i, 0, 255, 0); sleep_ms(100);
-        led_set_rgb(leds, i, 0, 0, 255); sleep_ms(100);
-        led_set_rgb(leds, i, 0, 0, 0); sleep_ms(100);
-        led_set_rgb(leds, i, 255, 255, 255); sleep_ms(100);
-        led_set_rgb(leds, i, 0, 0, 0); sleep_ms(100);
-    }
-    led_deinit(&robot, &leds);
-
-    imu_t imu = imu_init_name(&robot, "imu0");
-
-    if (!imu.ctx) {
-        robot_deinit(&robot);
-        return 1;
-    }
-
-    for (size_t i = 0; i < 50; i++) {
-        imu_sample_t s = imu_read(imu);
-        printf("\tA[ms^2]  %+7.3f %+7.3f %+7.3f |\n"
-               "\tG[deg/s] %+7.2f %+7.2f %+7.2f |\n"
-               "\tM[uT] %+7.2f %+7.2f %+7.2f |\n"
-               "T %.2f C\n",
-                s.accel_ms2[0], s.accel_ms2[1], s.accel_ms2[2],
-                s.gyro_dps[0], s.gyro_dps[1], s.gyro_dps[2],
-                s.mag_uT[0], s.mag_uT[1], s.mag_uT[2],
-                s.temp_c);
-        sleep_ms(50);
-    }
-
-    gpio_t button = gpio_init_name(&robot, "top_button");
-    gpio_set_as_input(button);
-    for (size_t i = 0; i < 10; i++) {
-        int v = gpio_read(button);
-        printf("Button state: %d\n", v);
-        sleep_ms(500);
-    }
-
-    gpio_t button_led = gpio_init_name(&robot, "top_button_led");
-    gpio_set_as_output(button_led);
-    for (size_t i = 0; i < 10; i++) {
-        gpio_write(button_led, 1);
-        sleep_ms(100);
-        gpio_write(button_led, 0);
-        sleep_ms(100);
-    }
-
-    gpio_t hat_led = gpio_init_name(&robot, "hat_builtin_led");
-    gpio_set_as_output(hat_led);
-    for (size_t i = 0; i < 10; i++) {
-        gpio_write(hat_led, 1);
-        sleep_ms(100);
-        gpio_write(hat_led, 0);
-        sleep_ms(100);
-    }
-
-    motor_t m1 = motor_init_name(&robot, "motor1");
-    motor_t m2 = motor_init_name(&robot, "motor2");
-    motor_set(m1, -0.40f);
-    motor_set(m2, -0.40f);
-    sleep_ms(500);
-    motor_brake(m1);
-    motor_brake(m2);
-
-    return 0;
+#ifdef __cplusplus
 }
+#endif
+#endif // FOXY_IMPLEMENTATION
+#endif // __FOXY_HPP__
