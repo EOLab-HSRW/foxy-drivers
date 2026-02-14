@@ -17,6 +17,13 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <sys/ioctl.h>
+#include <linux/i2c.h>
+#include <linux/i2c-dev.h>
+
+#include <math.h>
+#include <time.h>
+
 /**
  * enum platform_family - High-level platform family.
  * @PLATFORM_FAMILY_UNKNOWN: Unknown or not detected.
@@ -503,6 +510,253 @@ void robot_def_dump(const robot_def_t *def, void *out) {
 
     }
 }
+// ========================================================================================
+/**
+ * HELPERS IOCTL functions
+ */
+// ========================================================================================
+
+static int i2c_rdwr(int fd, struct i2c_msg *msgs, int nmsgs) {
+    struct i2c_rdwr_ioctl_data data = {
+        .msgs  = msgs,
+        .nmsgs = (uint32_t)nmsgs
+    };
+
+    if (ioctl(fd, I2C_RDWR, &data) < 0) return -1;
+    return 0;
+}
+
+static int i2c_write_reg_bytes(int fd,
+                               uint8_t addr7,
+                               uint8_t reg, 
+                               const uint8_t *buf,
+                               size_t len) {
+    uint8_t tmp[1 + 32];
+    if (len > 32) { errno = EINVAL; return -1; }
+    tmp[0] = reg;
+    if (len) memcpy(&tmp[1], buf, len);
+
+    struct i2c_msg msg = {
+        .addr  = addr7,
+        .flags = 0,
+        .len   = (uint16_t)(1 + len),
+        .buf   = tmp
+    };
+
+    return i2c_rdwr(fd, &msg, 1);
+}
+
+static int i2c_write_reg_u8(int fd, uint8_t addr7, uint8_t reg, uint8_t value) {
+    return i2c_write_reg_bytes(fd, addr7, reg, &value, 1);
+}
+
+static int i2c_read_reg_u8(int fd, uint8_t addr7, uint8_t reg, uint8_t *out) {
+    struct i2c_msg msgs[2];
+
+    uint8_t r = reg;
+
+    msgs[0].addr = addr7;
+    msgs[0].flags = 0;
+    msgs[0].len = 1;
+    msgs[0].buf = &r;
+
+    msgs[1].addr = addr7;
+    msgs[1].flags = I2C_M_RD;
+    msgs[1].len = 1;
+    msgs[1].buf = out;
+
+    return i2c_rdwr(fd, msgs, 2);
+}
+
+// ========================================================================================
+/**
+ * UTILITY functions
+ */
+// ========================================================================================
+
+static void sleep_ms(unsigned ms) {
+    struct timespec ts;
+    ts.tv_sec = (time_t)(ms / 1000);
+    ts.tv_nsec = (long)((ms % 1000) * 1000000UL);
+    nanosleep(&ts, NULL);
+}
+
+// this is LUT table for gamma correction
+// to get "better" led colors
+static uint16_t gamma_lut[256];
+
+static void gamma_init(double gamma) {
+   uint16_t res_12bit = 4095; // 12-bit PWM on PCA9685
+   for (int i = 0; i < 256; i++) {
+       double x = (double)i / 255.0;
+       double y = pow(x, gamma);
+       long v12 = lround(y * (double)(res_12bit));
+       if (v12 < 0) v12 = 0;
+       if (v12 > res_12bit) v12 = res_12bit;
+       gamma_lut[i] = (uint16_t)v12;
+   }
+}
+
+
+
+// ========================================================================================
+/**
+ * PERIPHERALS STRUCT PUBLIC APIs
+ */
+// ========================================================================================
+
+#define PCA9685_MODE1       0x00
+#define PCA9685_MODE2       0x01
+#define PCA9685_PRESCALE    0xFE
+
+#define PCA9685_LED0_ON_L     0x06
+#define PCA9685_ALL_LED_ON_L  0xFA
+#define PCA9685_ALL_LED_ON_H  0xFB
+#define PCA9685_ALL_LED_OFF_L 0xFC
+#define PCA9685_ALL_LED_OFF_H 0xFD
+
+#define MODE1_RESTART (1u << 7)
+#define MODE1_AI      (1u << 5)
+#define MODE1_SLEEP   (1u << 4)
+
+#define MODE2_OUTDRV  (1u << 2)
+#define LED_FULL_ON_OFF_BIT (1u << 4)
+#define PCA9685_OSC_HZ 25000000.0
+#define PCA9685_TICKS_COUNT 4096
+#define PCA9685_TICKS_MAX (PCA9685_TICKS_COUNT - 1)
+
+static uint8_t prescale_for_hz(double pwm_hz) {
+    // prescale  = round(osc / (4096*hz)) - 1
+    // Units: Hz / (counts * Hz) => unitless
+    double prescale_f = (PCA9685_OSC_HZ / (4096.0 * pwm_hz)) - 1.0;
+    long prescale = lround(prescale_f);
+
+    if (prescale < 3) prescale = 3;
+    if (prescale > 255) prescale = 255;
+    return (uint8_t)prescale;
+}
+
+static int led_init(int fd, uint8_t addr7, double pwm_hz) {
+    if (i2c_write_reg_u8(fd, addr7, PCA9685_MODE2, MODE2_OUTDRV) < 0) {
+        return -1;
+    }
+
+    uint8_t mode1 = 0;
+    if (i2c_read_reg_u8(fd, addr7, PCA9685_MODE1, &mode1) < 0) {
+        return -1;
+    }
+
+    uint8_t mode1_sleep = (uint8_t)((mode1 & ~MODE1_RESTART) | MODE1_SLEEP | MODE1_AI);
+    if (i2c_write_reg_u8(fd, addr7, PCA9685_MODE1, mode1_sleep) < 0) {
+        return -1;
+    }
+
+    uint8_t prescale = prescale_for_hz(pwm_hz);
+    if (i2c_write_reg_u8(fd, addr7, PCA9685_PRESCALE, prescale) < 0) {
+        return -1;
+    }
+
+    uint8_t mode1_wake = (uint8_t)((mode1 & ~MODE1_SLEEP) | MODE1_AI);
+    if (i2c_write_reg_u8(fd, addr7, PCA9685_MODE1, mode1_wake) < 0) {
+        return -1;
+    }
+
+    // wait for osc to stabilize
+    sleep_ms(2);
+
+    if (i2c_write_reg_u8(fd, addr7, PCA9685_MODE1, (uint8_t)(mode1_wake | MODE1_RESTART)) < 0) {
+        return -1;
+    }
+
+    // Put all the channels in OFF state
+    // using FULL OFF bit.
+    uint8_t all_off[4] = {0x00, 0x00, 0x00, LED_FULL_ON_OFF_BIT };
+    if (i2c_write_reg_bytes(fd, addr7, PCA9685_ALL_LED_ON_L, all_off, sizeof(all_off)) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int led_set_pwm(int fd, uint8_t addr7, uint8_t channel, uint16_t on, uint16_t off) {
+    if (channel > 15 || on > PCA9685_TICKS_MAX || off > PCA9685_TICKS_MAX ) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    uint8_t reg = (uint8_t)(PCA9685_LED0_ON_L + 4 * channel);
+    uint8_t buf[4];
+
+    if (off == 0) {
+        buf[0] = 0x00;                // ON_L
+        buf[1] = 0x00;                // ON_H
+        buf[2] = 0x00;                // OFF_L
+        buf[3] = LED_FULL_ON_OFF_BIT; // OFF_H with FULL OFF bit
+    } else if (off >= 4095) {
+        buf[0] = 0x00;
+        buf[1] = LED_FULL_ON_OFF_BIT;
+        buf[2] = 0x00;
+        buf[3] = 0x00;
+    } else {
+        // standard PWM
+        buf[0] = (uint8_t)(on & 0xFF);
+        buf[1] = (uint8_t)((on >> 8) & 0x0F);
+        buf[2] = (uint8_t)(off & 0xFF);
+        buf[3] = (uint8_t)((off >> 8) & 0x0F);
+    }
+
+    return i2c_write_reg_bytes(fd, addr7, reg, buf, sizeof(buf));
+}
+
+static uint16_t rgb8_to_12(uint8_t v8) {
+    uint16_t v12 = gamma_lut[v8];
+    return v12;
+}
+
+static int led_set_rgb(int fd,
+                       uint8_t addr7,
+                       uint8_t led_index,
+                       uint8_t r8,
+                       uint8_t g8,
+                       uint8_t b8) {
+    uint8_t base = (uint8_t)(led_index * 3);
+
+    if (base + 2 > 15) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    uint16_t r12 = rgb8_to_12(r8);
+    uint16_t g12 = rgb8_to_12(g8);
+    uint16_t b12 = rgb8_to_12(b8);
+
+    if (led_set_pwm(fd, addr7, base + 0, 0, r12) < 0) return -1;
+    if (led_set_pwm(fd, addr7, base + 1, 0, g12) < 0) return -1;
+    if (led_set_pwm(fd, addr7, base + 2, 0, b12) < 0) return -1;
+
+    return 0;
+}
+
+struct led;
+
+typedef struct {
+    void (*destroy)(struct led *l);
+    int  (*set_rgb)(struct led *l, unsigned r, unsigned g, unsigned b);
+} led_ops_t;
+
+typedef struct led {
+    const led_ops_t *ops;
+    void *ctx;
+} led_t;
+
+static inline void led_destroy(led_t *l) {
+    if (l && l->ops && l->ops->destroy)
+        l->ops->destroy(l);
+}
+
+// static inline int led_set_rgb(led_t *l, unsigned r, unsigned g, unsigned b) {
+//    return (l && l->ops && l->ops->set_rgb) ? l->ops-set_rgb(l, r, g, b) : -1;
+//}
 
 int main(void)
 {
@@ -535,7 +789,43 @@ int main(void)
     }
 
     robot_def_dump(def, stdout);
+
+    // Drivers section
+    int fd = open("/dev/i2c-1", O_RDWR | O_CLOEXEC);
+    if (fd < 0) { } // handle error opening the bus
+
+    unsigned long funcs = 0;
+    if (ioctl(fd, I2C_FUNCS, &funcs) < 0) {
+        // it does not have i2c functions
+        close(fd);
+    }
+
+    if (!(funcs & I2C_FUNC_I2C)) {
+        close(fd);
+    }
+
+    gamma_init(2.2);
+    uint8_t led_addr = 0x40;
+
+    double pwm_hz = 1000.0;
+    if (led_init(fd, led_addr, pwm_hz) < 0) {
+        close(fd);
+        return 1;
+    }
+
+    led_set_rgb(fd, led_addr, 0, 255, 0, 0);
+    sleep_ms(1000);
+    led_set_rgb(fd, led_addr, 0, 0, 255, 0);
+    sleep_ms(1000);
+    led_set_rgb(fd, led_addr, 0, 0, 0, 255);
+    sleep_ms(1000);
+
+    led_set_rgb(fd, led_addr, 0, 128, 128, 128);
+    sleep_ms(1000);
     
+    led_set_rgb(fd, led_addr, 0, 0, 0, 0);
+    close(fd);
+
     return 0;
 
 }
