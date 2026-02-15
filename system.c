@@ -550,6 +550,23 @@ static int i2c_write_reg_u8(int fd, uint8_t addr7, uint8_t reg, uint8_t value) {
     return i2c_write_reg_bytes(fd, addr7, reg, &value, 1);
 }
 
+static int i2c_read_reg_bytes(int fd, uint8_t addr7, uint8_t reg, uint8_t *out, size_t len) {
+    struct i2c_msg msgs[2];
+    uint8_t r = reg;
+
+    msgs[0].addr = addr7;
+    msgs[0].flags = 0;
+    msgs[0].len = 1;
+    msgs[0].buf = &r;
+
+    msgs[1].addr = addr7;
+    msgs[1].flags = I2C_M_RD;
+    msgs[1].len = (uint16_t)len;
+    msgs[1].buf = out;
+
+    return i2c_rdwr(fd, msgs, 2);
+}
+
 static int i2c_read_reg_u8(int fd, uint8_t addr7, uint8_t reg, uint8_t *out) {
     struct i2c_msg msgs[2];
 
@@ -758,6 +775,161 @@ static inline void led_destroy(led_t *l) {
 //    return (l && l->ops && l->ops->set_rgb) ? l->ops-set_rgb(l, r, g, b) : -1;
 //}
 
+#define MPU6050_WHO_AM_I     0x75
+#define MPU6050_PWR_MGMT_1   0x6B
+#define MPU6050_SAMPLE_RATE_DIV   0x19
+#define MPU6050_CONFIG       0x1A
+#define MPU6050_GYRO_CONFIG  0x1B
+#define MPU6050_ACCEL_CONFIG 0x1C
+
+#define MPU6050_ACCEL_XOUT_H 0x3B // burst-read start register 14 bytes
+
+#define PWR1_SLEEP            (1u << 6)
+#define PWR1_CLKSEL_PLL_XGYRO 0x01
+
+// CONFIG (DLPF) common values:
+// 0: 260 Hz accel / 256 Hz gyro (lowest latency, noiser)
+// 3: ~44 Hz accel / ~42 Hz gyro (good general-purpose)
+// 6: ~5 Hz accel/gyro (very smooth, more delay)
+
+typedef enum {
+    MPU6050_ACCEL_2G  = 0, // +-2g  (16384 LSB/g)
+    MPU6050_ACCEL_4G  = 1, // +-4g  (8192  LSB/g)
+    MPU6050_ACCEL_8G  = 2, // +-8g  (4096  LSB/g)
+    MPU6050_ACCEL_16G = 3  // +-16g (2048  LSB/g)
+} mpu6050_accel_range_t;
+
+typedef enum {
+    MPU6050_GYRO_250DPS  = 0, // +-250  (131  LSB/(deg/s))
+    MPU6050_GYRO_500DPS  = 1, // +-500  (65.5 LSB/(deg/s))
+    MPU6050_GYRO_1000DPS = 2, // +-1000 (32.8 LSB/(deg/s))
+    MPU6050_GYRO_2000DPS = 3, // +-2000 (16.4 LSB/(deg/s))
+} mpu6050_gyro_range_t;
+
+typedef struct {
+    uint8_t addr7;
+    mpu6050_accel_range_t accel_range;
+    mpu6050_gyro_range_t gyro_range;
+    uint8_t dlpf_cfg;
+    uint8_t sample_rate_div;
+
+    float accel_lsb_per_g;
+    float gyro_lsb_per_dps;
+} mpu6050_t;
+
+typedef struct {
+    int16_t ax, ay, az;
+    int16_t temp;
+    int16_t gx, gy, gz;
+} mpu6050_raw_t;
+
+typedef struct {
+    float ax_g, ay_g, az_g;
+    float ax_ms2, ay_ms2, az_ms2;
+    float gx_dps, gy_dps, gz_dps;
+    float temp_c;
+} mpu6050_si_t;
+
+static float accel_lsb_per_g(mpu6050_accel_range_t r) {
+    switch (r) {
+        case MPU6050_ACCEL_2G:  return 16384.0f;
+        case MPU6050_ACCEL_4G:  return 8192.0f;
+        case MPU6050_ACCEL_8G:  return 4096.0f;
+        case MPU6050_ACCEL_16G: return 2048.0f;
+        default: return 8192.0f;
+    }
+}
+
+static float gyro_lsb_per_dps(mpu6050_gyro_range_t r) {
+    switch (r) {
+        case MPU6050_GYRO_250DPS:  return 131.0f;
+        case MPU6050_GYRO_500DPS:  return 65.5f;
+        case MPU6050_GYRO_1000DPS: return 32.8f;
+        case MPU6050_GYRO_2000DPS: return 16.4f;
+        default: return 131.0f;
+    }
+}
+
+static int mpu6050_init(int fd, mpu6050_t *dev) {
+    if (!dev) { errno = EINVAL; return -1; }
+
+    // Let's check if the MPU6050 is actually there
+    uint8_t who = 0;
+    if (i2c_write_reg_bytes(fd, dev->addr7, MPU6050_WHO_AM_I, &who, 1) < 0) return -1;
+
+    //
+    if ((who & 0x7E) != 0x68) {
+        // TODO: print warning
+    }
+
+    if (i2c_write_reg_u8(fd, dev->addr7, MPU6050_PWR_MGMT_1, PWR1_CLKSEL_PLL_XGYRO) < 0){
+        return -1;
+    }
+    // wait for the clock to stabilize
+    sleep_ms(10);
+
+    if (dev->dlpf_cfg > 6) {
+        dev->dlpf_cfg = 3;
+    }
+    if (i2c_write_reg_u8(fd, dev->addr7, MPU6050_CONFIG, (uint8_t)(dev->dlpf_cfg & 0x07)) < 0) {
+        return -1;
+    }
+
+    if (i2c_write_reg_u8(fd, dev->addr7, MPU6050_SAMPLE_RATE_DIV, dev->sample_rate_div) < 0) {
+        return -1;
+    }
+
+    uint8_t gyro_cfg = (uint8_t)((dev->gyro_range & 0x03) << 3);
+    if (i2c_write_reg_u8(fd, dev->addr7, MPU6050_GYRO_CONFIG, gyro_cfg) < 0) {
+        return -1;
+    }
+
+    uint8_t accel_cfg = (uint8_t)((dev->accel_range & 0x03) << 3);
+    if (i2c_write_reg_u8(fd, dev->addr7, MPU6050_ACCEL_CONFIG, accel_cfg) < 0) {
+        return -1;
+    }
+
+    dev->accel_lsb_per_g = accel_lsb_per_g(dev->accel_range);
+    dev->gyro_lsb_per_dps = gyro_lsb_per_dps(dev->gyro_range);
+}
+
+static int mpu6050_read_raw(int fd, const mpu6050_t *dev, mpu6050_raw_t *out) {
+    if (!dev || !out) { errno = EINVAL; return -1; }
+
+    uint8_t buf[14];
+    if (i2c_read_reg_bytes(fd, dev->addr7, MPU6050_ACCEL_XOUT_H, buf, sizeof(buf)) < 0) {
+        return -1;
+    }
+
+    out->ax   = (int16_t)((buf[0] << 8) | buf[1]);
+    out->ay   = (int16_t)((buf[2] << 8) | buf[3]);
+    out->az   = (int16_t)((buf[4] << 8) | buf[5]);
+    out->temp = (int16_t)((buf[6] << 8) | buf[7]);
+    out->gx   = (int16_t)((buf[8] << 8) | buf[9]);
+    out->gy   = (int16_t)((buf[10] << 8) | buf[11]);
+    out->gz   = (int16_t)((buf[12] << 8) | buf[13]);
+
+    return 0;
+}
+
+static void mpu6050_convert_si(const mpu6050_t *dev, const mpu6050_raw_t *raw, mpu6050_si_t *si) {
+    si->ax_g = (float)raw->ax / dev->accel_lsb_per_g;
+    si->ay_g = (float)raw->ay / dev->accel_lsb_per_g;
+    si->az_g = (float)raw->az / dev->accel_lsb_per_g;
+
+    // g -> m/s^2
+    const float g = 9.80665f;
+    si->ax_ms2 = si->ax_g * g;
+    si->ay_ms2 = si->ay_g * g;
+    si->az_ms2 = si->az_g * g;
+
+    si->gx_dps = (float)raw->gx / dev->gyro_lsb_per_dps;
+    si->gy_dps = (float)raw->gy / dev->gyro_lsb_per_dps;
+    si->gz_dps = (float)raw->gz / dev->gyro_lsb_per_dps;
+
+    si->temp_c = ((float)raw->temp / 340.0f) + 36.53;
+}
+
 int main(void)
 {
 	platform_t platform;
@@ -813,17 +985,52 @@ int main(void)
         return 1;
     }
 
-    led_set_rgb(fd, led_addr, 0, 255, 0, 0);
-    sleep_ms(1000);
-    led_set_rgb(fd, led_addr, 0, 0, 255, 0);
-    sleep_ms(1000);
-    led_set_rgb(fd, led_addr, 0, 0, 0, 255);
-    sleep_ms(1000);
+    for (size_t i = 0; i < 0; i++) {
+        led_set_rgb(fd, led_addr, i, 255, 0, 0);
+        sleep_ms(1000);
+        led_set_rgb(fd, led_addr, i, 0, 255, 0);
+        sleep_ms(1000);
+        led_set_rgb(fd, led_addr, i, 0, 0, 255);
+        sleep_ms(1000);
 
-    led_set_rgb(fd, led_addr, 0, 128, 128, 128);
-    sleep_ms(1000);
-    
-    led_set_rgb(fd, led_addr, 0, 0, 0, 0);
+        led_set_rgb(fd, led_addr, i, 128, 128, 128);
+        sleep_ms(1000);
+        led_set_rgb(fd, led_addr, i, 0, 0, 0);
+        sleep_ms(1000);
+        led_set_rgb(fd, led_addr, i, 255, 255, 255);
+        sleep_ms(1000);
+        led_set_rgb(fd, led_addr, i, 0, 0, 0);
+    }
+
+    mpu6050_t imu = {
+        .addr7 = 0x68,
+        .accel_range = MPU6050_ACCEL_4G,
+        .gyro_range = MPU6050_GYRO_500DPS,
+        .dlpf_cfg = 3,
+        .sample_rate_div = 9
+    };
+
+    if (mpu6050_init(fd, &imu) < 0) {
+        close(fd);
+        return 1;
+    }
+
+    for (size_t i = 0; i < 500; i++) {
+        mpu6050_raw_t raw;
+        mpu6050_si_t si;
+
+        if (mpu6050_read_raw(fd, &imu, &raw) < 0) {
+            // fail to read raw
+            break;
+        }
+        mpu6050_convert_si(&imu, &raw, &si);
+
+        printf("\tA[g] %+7.3f %+7.3f %+7.3f |\n\tG[deg/s] %+7.2f %+7.2f %+7.2f | T %.2f C\n",
+                si.ax_g, si.ay_g, si.az_g, si.gx_dps, si.gy_dps, si.gz_dps, si.temp_c);
+
+        sleep_ms(50);
+    }
+
     close(fd);
 
     return 0;
