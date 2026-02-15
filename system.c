@@ -745,7 +745,7 @@ void robot_def_dump(const robot_def_t *def, void *out) {
 
         if (p->props && p->num_props) {
             fprintf(fp, "\t props:\n");
-            for (uint16_t k = 0; i < p->num_props; k++) {
+            for (uint16_t k = 0; k < p->num_props; k++) {
                 fprintf(fp, "\t - %s=%s\n",
                         p->props[k].key ? p->props[k].key : "(null)",
                         p->props[k].value ? p->props[k].value : "(null)");
