@@ -551,6 +551,7 @@ static const char *peripheral_prop_get(const peripheral_desc_t *d, const char *k
             return d->props[i].value;
         }
     }
+    return NULL;
 }
 
 static int peripheral_prop_get_u32(const peripheral_desc_t *d, const char *key, uint32_t *out) {
@@ -663,6 +664,13 @@ static const peripheral_kv_t leds_props[] = {
     { "gamma", "2.2" },
 };
 
+static const peripheral_kv_t imu_props[] = {
+    { "accel_range", "1" }, // set default 4G
+    { "gyro_range", "1" },  // set default 500 dps (deg/sec)
+    { "dlpf_cfg", "3" },    // set default 3 (~44Hz)
+    { "sample_rate_div", "9" }, // default 9
+};
+
 static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
     { 
         .type = PERIPH_DISPLAY,
@@ -682,7 +690,18 @@ static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
         .num_aux = 0,
         .props = leds_props,
         .num_props = (uint16_t)(sizeof(leds_props)/sizeof(leds_props[0])),
-    }
+    },
+
+    {
+        .type = PERIPH_IMU,
+        .name = "imu0",
+        .driver = "mpu6050",
+        .flags = PERIPH_FLAG_NONE,
+        .primary = PRI_I2C("/dev/i2c-1", 0x68),
+        .num_aux = 0,
+        .props = imu_props,
+        .num_props = (uint16_t)(sizeof(imu_props)/sizeof(imu_props[0])),
+    },
 };
 
 #define ROBOT_ENTRY(FAMILY, MODEL, HAT, ID, NAME, PERIPHS) \
@@ -877,7 +896,7 @@ static int open_i2c_fd(const char *file_descriptor) {
     if (!file_descriptor) return -EINVAL;
 
     int fd = open(file_descriptor, O_RDWR | O_CLOEXEC);
-    if (fd < 0) -errno;
+    if (fd < 0) return -errno;
 
     unsigned long funcs = 0;
     if (ioctl(fd, I2C_FUNCS, &funcs) < 0) {
@@ -1191,6 +1210,8 @@ static int mpu6050_init(int fd, mpu6050_t *dev) {
 
     dev->accel_lsb_per_g = accel_lsb_per_g(dev->accel_range);
     dev->gyro_lsb_per_dps = gyro_lsb_per_dps(dev->gyro_range);
+
+    return 0;
 }
 
 static int mpu6050_read_raw(int fd, const mpu6050_t *dev, mpu6050_raw_t *out) {
@@ -1474,6 +1495,11 @@ static void robot_slot_release(robot_t *r, uint16_t idx) {
     robot_slot_t *s = &r->slots[idx];
     if (!s->ctx) return;
 
+    if (s->refs > 1) {
+        s->refs--;
+        return;
+    }
+
     if (s->ctx) return;
 
     if (s->driver && s->driver->unbind) s->driver->unbind(s->ctx);
@@ -1628,8 +1654,164 @@ static void led_pca9685_unbind(void *p) {
     free(ctx);
 }
 
+// -------------------- IMU PUBLIC --------------------
+typedef struct { 
+    float accel_ms2[3]; // ax, ay, az
+    float gyro_dps[3];  // gx, gy, gz
+    float mag_uT[3];    // mx, my, my (zero if the given imu does not have it)
+    float temp_c;
+} imu_sample_t;
+
+typedef struct imu_ops imu_ops_t;
+
+typedef struct {
+    const imu_ops_t *ops;
+    void *ctx;
+    uint16_t _idx; // slot index
+} imu_t;
+
+struct imu_ops {
+    int (*read)(void *ctx, imu_sample_t *out);
+};
+
+static inline imu_sample_t imu_sample_zero(void) {
+    imu_sample_t s;
+    memset(&s, 0, sizeof(s));
+    return s;
+}
+
+imu_t imu_init(robot_t *r) {
+    imu_t out = {0};
+    if (!r || !r->def) return out;
+
+    uint16_t idx;
+    if (robot_find_first_index(r, PERIPH_IMU, &idx) != 0) return out;
+    if (robot_slot_acquire(r, idx) != 0) return out;
+
+    robot_slot_t *s = &r->slots[idx];
+
+    if (!s->ctx || !s->driver || !s->driver->ops) return out;
+
+    out.ops = (const imu_ops_t *)s->driver->ops;
+    out.ctx = s->ctx;
+    out._idx = idx;
+    return out;
+}
+
+void imu_deinit(robot_t *r, imu_t *h) {
+    if (!r || !h || !h->ctx) return;
+    if (h->_idx < r->nslots) robot_slot_release(r, h->_idx);
+    *h = (imu_t){0};
+}
+
+imu_sample_t imu_read(imu_t imu) {
+    imu_sample_t s = imu_sample_zero();
+    if (!imu.ops || !imu.ops->read || !imu.ctx) return s;
+    (void)imu.ops->read(imu.ctx, &s);
+    return s;
+}
+
+typedef struct {
+    int fd;
+    mpu6050_t dev;
+} mpu6050_imu_ctx_t;
+
+static int imu_mpu6050_read(void *p, imu_sample_t *out) {
+    if (!p || !out) return -EINVAL;
+
+    mpu6050_imu_ctx_t *ctx = (mpu6050_imu_ctx_t *)p;
+
+    mpu6050_raw_t raw;
+    mpu6050_si_t si;
+
+    if (mpu6050_read_raw(ctx->fd, &ctx->dev, &raw) < 0) {
+        return -errno;
+    }
+
+    mpu6050_convert_si(&ctx->dev, &raw, &si);
+
+    out->accel_ms2[0] = si.ax_ms2;
+    out->accel_ms2[1] = si.ay_ms2;
+    out->accel_ms2[2] = si.az_ms2;
+
+    out->gyro_dps[0] = si.gx_dps;
+    out->gyro_dps[1] = si.gy_dps;
+    out->gyro_dps[2] = si.gz_dps;
+
+    out->temp_c = si.temp_c;
+
+    return 0;
+}
+
+static const imu_ops_t imu_mpu6050_ops = {
+    .read = imu_mpu6050_read,
+};
+
+static int imu_mpu6050_bind(const peripheral_desc_t *desc, void **out_ctx) {
+    if (!desc || !out_ctx) return -EINVAL;
+    if (desc->type != PERIPH_IMU) return -EINVAL;
+    if (desc->primary.iface != IFACE_I2C) return -EINVAL;
+
+    const char *adapter = desc->primary.u.i2c.adapter;
+    uint8_t addr7 = (uint8_t)(desc->primary.u.i2c.addr & 0x7F);
+
+    // default values
+    mpu6050_t dev = {
+        .addr7 = addr7,
+        .accel_range = MPU6050_ACCEL_4G,
+        .gyro_range = MPU6050_GYRO_500DPS,
+        .dlpf_cfg = 3,
+        .sample_rate_div = 9
+    };
+
+    // optional overrides vis props
+    uint32_t v = 0;
+    if (peripheral_prop_get_u32(desc, "accel_range", &v) == 0) {
+        if (v > 3) v = 3;
+        dev.accel_range = (mpu6050_accel_range_t)v;
+    }
+    if (peripheral_prop_get_u32(desc, "gyro_range", &v) == 0) {
+        if (v > 3) v = 3;
+        dev.dlpf_cfg = (uint8_t)v;
+    }
+    if (peripheral_prop_get_u32(desc, "dlpf_cfg", &v) == 0) {
+        if (v > 6) v = 6;
+        dev.dlpf_cfg = (uint8_t)v;
+    }
+    if (peripheral_prop_get_u32(desc, "sample_rate_div", &v) == 0) {
+        if (v > 255) v = 255;
+        dev.sample_rate_div = (uint8_t)v;
+    }
+
+    int fd = open_i2c_fd(adapter);
+
+    if (mpu6050_init(fd, &dev) < 0) {
+        int e = errno ? -errno : -EIO;
+        close(fd);
+        return e;
+    }
+
+    mpu6050_imu_ctx_t *ctx = (mpu6050_imu_ctx_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) { close(fd); return -ENOMEM; }
+
+    ctx->fd = fd;
+    ctx->dev = dev;
+
+    *out_ctx = ctx;
+    return 0;
+}
+
+static void imu_mpu6050_umbind(void *p) {
+    mpu6050_imu_ctx_t *ctx = (mpu6050_imu_ctx_t *)p;
+    if (!ctx) return;
+    if (ctx->fd >= 0) close(ctx->fd);
+    free(ctx);
+}
+
+
 static const peripheral_driver_t global_drivers[] = {
     { .name="pca9685", .type=PERIPH_LED, .bind=led_pca9685_bind, .unbind=led_pca9685_unbind, .ops=&led_pca9685_ops },
+    { .name="mpu6050", .type=PERIPH_IMU, .bind=imu_mpu6050_bind, .unbind=imu_mpu6050_umbind, .ops=&imu_mpu6050_ops },
 
     // add more drivers here...
 };
@@ -1665,38 +1847,24 @@ int main(void) {
     }
     led_deinit(&robot, &leds);
 
-    mpu6050_t imu = {
-        .addr7 = 0x68,
-        .accel_range = MPU6050_ACCEL_4G,
-        .gyro_range = MPU6050_GYRO_500DPS,
-        .dlpf_cfg = 3,
-        .sample_rate_div = 9
-    };
+    imu_t imu = imu_init(&robot);
 
-    // if (mpu6050_init(fd, &imu) < 0) {
-    //     close(fd);
-    //     return 1;
-    // }
-    //
-    // for (size_t i = 0; i < 0; i++) {
-    //     mpu6050_raw_t raw;
-    //     mpu6050_si_t si;
-    //
-    //     if (mpu6050_read_raw(fd, &imu, &raw) < 0) {
-    //         // fail to read raw
-    //         break;
-    //     }
-    //     mpu6050_convert_si(&imu, &raw, &si);
-    //
-    //     printf("\tA[g] %+7.3f %+7.3f %+7.3f |\n\tG[deg/s] %+7.2f %+7.2f %+7.2f | T %.2f C\n",
-    //             si.ax_g, si.ay_g, si.az_g, si.gx_dps, si.gy_dps, si.gz_dps, si.temp_c);
-    //
-    //     sleep_ms(50);
-    // }
-    //
-    // close(fd);
-    //
+    if (!imu.ctx) {
+        robot_deinit(&robot);
+        return 1;
+    }
+
+    for (size_t i = 0; i < 100; i++) {
+        imu_sample_t s = imu_read(imu);
+        printf("\tA[ms^2]  %+7.3f %+7.3f %+7.3f |\n"
+               "\tG[deg/s] %+7.2f %+7.2f %+7.2f |\n"
+               "\tM[uT] %+7.2f %+7.2f %+7.2f |\n"
+               "T %.2f C\n",
+                s.accel_ms2[0], s.accel_ms2[1], s.accel_ms2[2],
+                s.gyro_dps[0], s.gyro_dps[1], s.gyro_dps[2],
+                s.mag_uT[0], s.mag_uT[1], s.mag_uT[2],
+                s.temp_c);
+        sleep_ms(50);
+    }
     return 0;
-
 }
-
