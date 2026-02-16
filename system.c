@@ -10,6 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <stdlib.h>
 
 #include <sys/ioctl.h>
 #include <linux/i2c.h>
@@ -541,6 +542,37 @@ static const char *type_to_string(peripheral_type_t t) {
     }
 }
 
+// helpers to parse props (peripheral properties)
+static const char *peripheral_prop_get(const peripheral_desc_t *d, const char *key) {
+    if (!d || !d->props || !key) return NULL;
+    for (uint16_t i = 0; i < d->num_props; i++) {
+        if (!d->props[i].key) continue;
+        if (strcmp(d->props[i].key, key) == 0) {
+            return d->props[i].value;
+        }
+    }
+}
+
+static int peripheral_prop_get_u32(const peripheral_desc_t *d, const char *key, uint32_t *out) {
+    const char *v = peripheral_prop_get(d, key);
+    if (!v || !out) return -1;
+    char *end = NULL;
+    unsigned long x =strtoul(v, &end, 0);
+    if (end == v) return -1;
+    *out = (uint32_t)x;
+    return 0;
+}
+
+static int peripheral_prop_get_double(const peripheral_desc_t *d, const char *key, double *out) {
+    const char *v = peripheral_prop_get(d, key);
+    if (!v || !out) return -1;
+    char *end = NULL;
+    double x = strtod(v, &end);
+    if (end == v) return -1;
+    *out = x;
+    return 0;
+}
+
 static void dump_endpoint_u(FILE *fp, peripheral_iface_t iface, const endpoint_u_t *u) {
     switch (iface) {
         case IFACE_I2C:
@@ -621,13 +653,15 @@ typedef struct {
     uint16_t platform_model;
     hat_t hat;
 
-    // TODO: paths and cap?
-    //
-
     const peripheral_desc_t *peripherals;
     size_t num_peripherals;
 
 } robot_def_t;
+
+static const peripheral_kv_t leds_props[] = {
+    { "pwm_hz", "1000" },
+    { "gamma", "2.2" },
+};
 
 static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
     { 
@@ -637,6 +671,17 @@ static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
         .flags = PERIPH_FLAG_NONE,
         .primary = PRI_I2C("/dev/i2c-1", 0x3C),
         .num_aux = 0,
+    },
+
+    {
+        .type = PERIPH_LED,
+        .name = "leds_front_and_rear",
+        .driver = "pca9685",
+        .flags =  PERIPH_FLAG_NONE,
+        .primary = PRI_I2C("/dev/i2c-1", 0x40),
+        .num_aux = 0,
+        .props = leds_props,
+        .num_props = (uint16_t)(sizeof(leds_props)/sizeof(leds_props[0])),
     }
 };
 
@@ -828,6 +873,27 @@ static int i2c_read_reg_u8(int fd, uint8_t addr7, uint8_t reg, uint8_t *out) {
     return i2c_rdwr(fd, msgs, 2);
 }
 
+static int open_i2c_fd(const char *file_descriptor) {
+    if (!file_descriptor) return -EINVAL;
+
+    int fd = open(file_descriptor, O_RDWR | O_CLOEXEC);
+    if (fd < 0) -errno;
+
+    unsigned long funcs = 0;
+    if (ioctl(fd, I2C_FUNCS, &funcs) < 0) {
+        int e = -errno;
+        close(fd);
+        return e;
+    }
+
+    if (!(funcs & I2C_FUNC_I2C)) {
+        close(fd);
+        return -ENOTSUP;
+    }
+
+    return fd;
+}
+
 // ========================================================================================
 /**
  * UTILITY functions
@@ -867,9 +933,11 @@ static void gamma_init(double gamma) {
 
 // ========================================================================================
 /**
- * PERIPHERALS STRUCT PUBLIC APIs
+ * PERIPHERALS: Low-level functions
  */
 // ========================================================================================
+
+// ++++++++++++++++++++++++++ PCA9685 ++++++++++++++++++++++++++
 
 #define PCA9685_MODE1       0x00
 #define PCA9685_MODE2       0x01
@@ -902,7 +970,7 @@ static uint8_t prescale_for_hz(double pwm_hz) {
     return (uint8_t)prescale;
 }
 
-static int led_init(int fd, uint8_t addr7, double pwm_hz) {
+static int pca9685_init(int fd, uint8_t addr7, double pwm_hz) {
     if (i2c_write_reg_u8(fd, addr7, PCA9685_MODE2, MODE2_OUTDRV) < 0) {
         return -1;
     }
@@ -944,7 +1012,7 @@ static int led_init(int fd, uint8_t addr7, double pwm_hz) {
     return 0;
 }
 
-static int led_set_pwm(int fd, uint8_t addr7, uint8_t channel, uint16_t on, uint16_t off) {
+static int pca9685_set_pwm(int fd, uint8_t addr7, uint8_t channel, uint16_t on, uint16_t off) {
     if (channel > 15 || on > PCA9685_TICKS_MAX || off > PCA9685_TICKS_MAX ) {
         errno = EINVAL;
         return -1;
@@ -979,7 +1047,9 @@ static uint16_t rgb8_to_12(uint8_t v8) {
     return v12;
 }
 
-static int led_set_rgb(int fd,
+// This is a helper function to set 3 channels of
+// the PCA9685 to drive the RGB color of a LED
+static int pca9685_set_rgb(int fd,
                        uint8_t addr7,
                        uint8_t led_index,
                        uint8_t r8,
@@ -996,35 +1066,14 @@ static int led_set_rgb(int fd,
     uint16_t g12 = rgb8_to_12(g8);
     uint16_t b12 = rgb8_to_12(b8);
 
-    if (led_set_pwm(fd, addr7, base + 0, 0, r12) < 0) return -1;
-    if (led_set_pwm(fd, addr7, base + 1, 0, g12) < 0) return -1;
-    if (led_set_pwm(fd, addr7, base + 2, 0, b12) < 0) return -1;
+    if (pca9685_set_pwm(fd, addr7, base + 0, 0, r12) < 0) return -1;
+    if (pca9685_set_pwm(fd, addr7, base + 1, 0, g12) < 0) return -1;
+    if (pca9685_set_pwm(fd, addr7, base + 2, 0, b12) < 0) return -1;
 
     return 0;
 }
 
-struct led;
-
-typedef struct {
-    void (*destroy)(struct led *l);
-    int  (*set_rgb)(struct led *l, unsigned r, unsigned g, unsigned b);
-} led_ops_t;
-
-typedef struct led {
-    const led_ops_t *ops;
-    void *ctx;
-} led_t;
-
-static inline void led_destroy(led_t *l) {
-    if (l && l->ops && l->ops->destroy)
-        l->ops->destroy(l);
-}
-
-// static inline int led_set_rgb(led_t *l, unsigned r, unsigned g, unsigned b) {
-//    return (l && l->ops && l->ops->set_rgb) ? l->ops-set_rgb(l, r, g, b) : -1;
-//}
-
-// ++++++++++++++++++++++++++ IMU ++++++++++++++++++++++++++
+// ++++++++++++++++++++++++++ MPU6050 ++++++++++++++++++++++++++
 
 #define MPU6050_WHO_AM_I     0x75
 #define MPU6050_PWR_MGMT_1   0x6B
@@ -1181,7 +1230,7 @@ static void mpu6050_convert_si(const mpu6050_t *dev, const mpu6050_raw_t *raw, m
     si->temp_c = ((float)raw->temp / 340.0f) + 36.53;
 }
 
-// ++++++++++++++++++++++++++ ToF ++++++++++++++++++++++++++
+// ++++++++++++++++++++++++++ VL53L0X ++++++++++++++++++++++++++
 
 typedef struct {
     int fd;
@@ -1279,70 +1328,342 @@ int vl53l0x_set_signal_rate_limit_mcps(int fd, float mcps) {
     return 1;
 }
 
-int main(void)
-{
-	platform_t platform;
-	char human[256];
+// ========================================================================================
+/**
+ * RUNTIME: Robot API
+ */
+// ========================================================================================
 
-	if (platform_detect(&platform, human, sizeof(human)) != 0) {
-        perror("platform_detect");
-	    return 1;
-	}
+// Harley: any assumption in software development is usually wrong,
+// but let's allow ourselves to be wrong this time, since this small
+// "foxy robot" wouldn't have more peripheral than this.
+//
+// If that's not the case, and the robot has a large a number of peripherals attached,
+// the fundamental principle of simplicity and minimalism that drive the philosophy of this
+// driver are broken at their core. In that situation, a different approach should be consider
+// instead of extending this one to the point where it becomes fragile and unmaintainable.
+//
+// Therefore, consider this number a complexity cealing that ideally should not be exceeded,
+// and if it is exceeded, that's is a good sign that it's time to rethink the approach.
+// In the best-case scenario, this number should increase only if it isn't accompanied
+// by additional code.
+#define ROBOT_MAX_PERIPHERALS 32
 
-    const hat_t hat = HAT_V3_15;
+typedef struct peripheral_driver peripheral_driver_t;
+
+// binding slot: this is always 1:1 with def->peripherals[i]
+typedef struct {
+    const peripheral_desc_t *desc;
+    const peripheral_driver_t *driver;
+    void *ctx;  // NUL if not bound
+    uint16_t refs; // refcount per process
+} robot_slot_t;
+
+typedef struct {
+    int error; // 0 if the robot is OK,else negative errno-style
+    const robot_def_t *def; // detected robot definition
+    robot_slot_t slots[ROBOT_MAX_PERIPHERALS];
+    size_t nslots;
+} robot_t;
+
+static inline int robot_ok(const robot_t *r) { return r && r->error == 0; }
+
+typedef struct led_ops led_ops_t;
+
+typedef struct {
+    const led_ops_t *ops;
+    void *ctx;
+    uint16_t _idx; // slot index
+} led_t;
+
+struct led_ops {
+    int (*set_rgb)(void *ctx, uint8_t idx, uint8_t r, uint8_t g, uint8_t b);
+};
+
+// PUBLIC API FUNCTION
+int led_set_rgb(led_t led, uint8_t idx, uint8_t r, uint8_t g, uint8_t b) {
+    if (!led.ops || !led.ops->set_rgb || !led.ctx) return -ENODEV;
+    return led.ops->set_rgb(led.ctx, idx, r, g, b);
+}
+
+// IMPORTANT: this is like a contract
+// that match peripheral driver+type with
+// the actual driver implementation
+struct peripheral_driver {
+    const char *name; // this name MUST match exactly the name defined in desc->driver.
+                      // QUESTION: should this name be unique? of should we allow multiples
+                      // peripherals to share the same driver implementation?
+                      // it can be use useful for motor, leds, buttons
+    peripheral_type_t type; // NOTE: not sure if really we need this for sanity check. leaving for now
+    int (*bind)(const peripheral_desc_t *desc, void **out_ctx);
+    void (*unbind)(void *ctx);
+    const void *ops;  // this point to the available <driver>_ops_t.
+};
+
+// forward declaration for global drivers registry
+// (populated later)
+static const peripheral_driver_t global_drivers[];
+static const size_t global_num_drivers;
+
+// driver lookup: exact-match only, deterministic
+// how should we tread duplicates ?
+static const peripheral_driver_t *driver_find_exact(const char *name,
+                                                    const peripheral_driver_t *tbl,
+                                                    size_t n) {
+    if (!name || !name[0] || !tbl) return NULL;
+    const peripheral_driver_t *m = NULL;
+
+    for (size_t i = 0; i < n; i++) {
+        if (!tbl[i].name) continue;
+        if (strcmp(tbl[i].name, name) != 0) continue;
+        if (m) return NULL; // duplicate name, returning NULL for now util we decide for a final solution
+        m = &tbl[i];
+    }
+    return m;
+}
+
+static int robot_find_first_index(const robot_t *r, peripheral_type_t type, uint16_t *out_idx) {
+    if (!r || !r->def || !out_idx) return -1;
+    for (size_t i = 0; i < r->def->num_peripherals; i++) {
+        const peripheral_desc_t *p = &r->def->peripherals[i];
+        if (p->type == type) {
+            *out_idx = (uint16_t)i;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+// binding slot to a peripheal description
+static int robot_slot_acquire(robot_t *r, uint16_t idx) {
+    if (!r || !r->def) return -EINVAL;
+    if (idx >= r->nslots) return -EINVAL;
+
+    robot_slot_t *s = &r->slots[idx];
+    const peripheral_desc_t *p = s->desc;
+
+    if (s->ctx) { s->refs++; return 0; }
+
+    if (peripheral_validate_basic(p) != PERIPH_OK) return -EINVAL;
+    if (!p->driver || !p->driver[0]) return -EINVAL;
+
+    const peripheral_driver_t *driver = driver_find_exact(p->driver, global_drivers, global_num_drivers);
+    if (!driver || !driver->bind) return -ENOENT;
+    if (driver->type != p->type) return -EINVAL;
+
+    void *ctx = NULL;
+    int brc = driver->bind(p, &ctx);
+    if (brc != 0) {
+        if (p->flags & PERIPH_FLAG_OPTIONAL) {
+            s->driver = driver;
+            s->ctx = NULL;
+            s->refs = 0;
+        }
+        return brc; // this is already in errno-style from bind
+    }
+
+    s->driver = driver;
+    s->ctx = ctx;
+    s->refs = 1;
+    return 0;
+}
+
+static void robot_slot_release(robot_t *r, uint16_t idx) {
+    if (!r || idx >= r->nslots) return;
+
+    robot_slot_t *s = &r->slots[idx];
+    if (!s->ctx) return;
+
+    if (s->ctx) return;
+
+    if (s->driver && s->driver->unbind) s->driver->unbind(s->ctx);
+    s->ctx = NULL;
+    s->driver = NULL;
+    s->refs = 0;
+}
+
+// IMPORTANT PUBLIC FUNCTION
+// this function initlialize the robot definition by:
+// 1) Detecting the current platform
+// 2) (ideally) Detecting the HAT
+// 3) initlialize slots to (later) attach drivers
+//    to peripherals
+robot_t robot_init(void) {
+    robot_t r;
+    memset(&r, 0, sizeof(r));
+    platform_t platform;
+    char human[256];
+
+    if (platform_detect(&platform, human, sizeof(human)) != 0) {
+        r.error = -ENODEV;
+        return r;
+    }
+
+    // TODO: detect HAT at runtime
+    // Harley 15 feb: IDK why the built-in EEPROM
+    // does not show up in the I2C bus.
+    hat_t hat = HAT_V3_15;
 
     const robot_def_t *def = NULL;
-
-    int rc = robot_def_get(platform, hat, &def);
-
-    if (rc != 0){
-        printf("What is this?\n");
-        // not supported combination of hardware:
-        // platform + model + hat
-        return 1;
+    if (robot_def_get(platform, hat, &def) != 0 || !def) {
+        r.error = -ENODEV;
+        return r;
     }
 
-    robot_def_dump(def, stdout);
-
-    // Drivers section
-    int fd = open("/dev/i2c-1", O_RDWR | O_CLOEXEC);
-    if (fd < 0) { } // handle error opening the bus
-
-    unsigned long funcs = 0;
-    if (ioctl(fd, I2C_FUNCS, &funcs) < 0) {
-        // it does not have i2c functions
-        close(fd);
+    r.def = def;
+    r.nslots = def->num_peripherals;
+    if (r.nslots > ROBOT_MAX_PERIPHERALS) {
+        r.error = -ENOMEM;
+        r.def = NULL;
+        r.nslots = 0;
+        return r;
     }
 
-    if (!(funcs & I2C_FUNC_I2C)) {
-        close(fd);
+    for (size_t i = 0; i < r.nslots; i++) {
+        r.slots[i].desc = &def->peripherals[i];
+        r.slots[i].driver = NULL;
+        r.slots[i].ctx = NULL;
+        r.slots[i].refs = 0;
     }
 
-    gamma_init(2.2);
-    uint8_t led_addr = 0x40;
+    r.error = 0;
+    return r;
+}
+
+void robot_deinit(robot_t *r) {
+    if (!r || !r->def) return;
+
+    for (size_t i = 0; i < r->nslots; i++) {
+        while (r->slots[i].ctx && r->slots[i].refs) {
+            robot_slot_release(r, (uint16_t)i);
+        }
+    }
+    memset(r, 0, sizeof(*r));
+}
+
+led_t led_init(robot_t *r) {
+    led_t out = {0};
+    if (!r || !r->def) return out;
+
+    uint16_t idx;
+    if (robot_find_first_index(r, PERIPH_LED, &idx) != 0) return out;
+
+    if (robot_slot_acquire(r, idx) != 0) return out;
+
+    robot_slot_t *s = &r->slots[idx];
+    if (!s->ctx || !s->driver || !s->driver->ops) return out;
+
+    out.ops = (const led_ops_t *)s->driver->ops;
+    out.ctx = s->ctx;
+    out._idx = idx;
+    return out;
+}
+
+void led_deinit(robot_t *r, led_t *h) {
+    if (!r || !h || !h->ctx) return;
+    if (h->_idx < r->nslots) robot_slot_release(r, h->_idx);
+    *h = (led_t){0};
+}
+
+typedef struct {
+    int fd;
+    uint8_t addr7;
+} pca9685_led_ctx_t;
+
+static int led_pca9685_set_rgb(void *p, uint8_t idx, uint8_t r, uint8_t g, uint8_t b) {
+    pca9685_led_ctx_t *ctx = (pca9685_led_ctx_t *)p;
+    if (!ctx) return -EINVAL;
+    if (pca9685_set_rgb(ctx->fd, ctx->addr7, idx, r, g, b) < 0) {
+        return -errno;
+    }
+    return 0;
+}
+
+static const led_ops_t led_pca9685_ops = {
+    .set_rgb =led_pca9685_set_rgb,
+};
+
+static int led_pca9685_bind(const peripheral_desc_t *desc, void **out_ctx) {
+    if (!desc || !out_ctx) return -EINVAL;
+    if (desc->type != PERIPH_LED) return -EINVAL;
+    if (desc->primary.iface != IFACE_I2C) return -EINVAL;
+
+    const char *adapter = desc->primary.u.i2c.adapter;
+    uint8_t addr7 = (uint8_t)(desc->primary.u.i2c.addr & 0x7F);
 
     double pwm_hz = 1000.0;
-    if (led_init(fd, led_addr, pwm_hz) < 0) {
+    double gamma = 2.2;
+
+    (void)peripheral_prop_get_double(desc, "pwm_hz", &pwm_hz);
+    (void)peripheral_prop_get_double(desc, "gamma", &gamma);
+
+    int fd = open_i2c_fd(adapter);
+
+    static bool gamma_inited = false;
+    if (!gamma_inited) {
+        gamma_init(gamma);
+        gamma_inited = true;
+    }
+
+    if (pca9685_init(fd, addr7, pwm_hz) < 0) {
+        int e = errno ? -errno : -EIO;
         close(fd);
+        return e;
+    }
+
+    pca9685_led_ctx_t *ctx = (pca9685_led_ctx_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) { close(fd); return -ENOMEM; }
+
+    ctx->fd = fd;
+    ctx->addr7 = addr7;
+
+    *out_ctx = ctx;
+    return 0;
+}
+
+static void led_pca9685_unbind(void *p) {
+    pca9685_led_ctx_t *ctx = (pca9685_led_ctx_t *)p;
+    if (!ctx) return;
+    if (ctx->fd >= 0) close(ctx->fd);
+    free(ctx);
+}
+
+static const peripheral_driver_t global_drivers[] = {
+    { .name="pca9685", .type=PERIPH_LED, .bind=led_pca9685_bind, .unbind=led_pca9685_unbind, .ops=&led_pca9685_ops },
+
+    // add more drivers here...
+};
+static const size_t global_num_drivers = sizeof(global_drivers)/sizeof(global_drivers[0]);
+
+int main(void) {
+
+    robot_t robot = robot_init();
+
+    if (!robot_ok(&robot)) {
+        // TODO: add message
+        // fail to init robot
         return 1;
     }
 
-    for (size_t i = 0; i < 4; i++) {
-        led_set_rgb(fd, led_addr, i, 255, 0, 0);
-        sleep_ms(100);
-        led_set_rgb(fd, led_addr, i, 0, 255, 0);
-        sleep_ms(100);
-        led_set_rgb(fd, led_addr, i, 0, 0, 255);
-        sleep_ms(100);
+    robot_def_dump(robot.def, stdout);
 
-        led_set_rgb(fd, led_addr, i, 128, 128, 128);
-        sleep_ms(100);
-        led_set_rgb(fd, led_addr, i, 0, 0, 0);
-        sleep_ms(100);
-        led_set_rgb(fd, led_addr, i, 255, 255, 255);
-        sleep_ms(100);
-        led_set_rgb(fd, led_addr, i, 0, 0, 0);
+    led_t leds = led_init(&robot);
+    if (!leds.ctx) {
+        // TODO: add message
+        // fail to init led driver
+        robot_deinit(&robot);
+        return 1;
     }
+
+    for (uint8_t i = 0; i < 4; i++) {
+        led_set_rgb(leds, i, 255, 0, 0); sleep_ms(100);
+        led_set_rgb(leds, i, 0, 255, 0); sleep_ms(100);
+        led_set_rgb(leds, i, 0, 0, 255); sleep_ms(100);
+        led_set_rgb(leds, i, 0, 0, 0); sleep_ms(100);
+        led_set_rgb(leds, i, 255, 255, 255); sleep_ms(100);
+        led_set_rgb(leds, i, 0, 0, 0); sleep_ms(100);
+    }
+    led_deinit(&robot, &leds);
 
     mpu6050_t imu = {
         .addr7 = 0x68,
@@ -1352,29 +1673,29 @@ int main(void)
         .sample_rate_div = 9
     };
 
-    if (mpu6050_init(fd, &imu) < 0) {
-        close(fd);
-        return 1;
-    }
-
-    for (size_t i = 0; i < 0; i++) {
-        mpu6050_raw_t raw;
-        mpu6050_si_t si;
-
-        if (mpu6050_read_raw(fd, &imu, &raw) < 0) {
-            // fail to read raw
-            break;
-        }
-        mpu6050_convert_si(&imu, &raw, &si);
-
-        printf("\tA[g] %+7.3f %+7.3f %+7.3f |\n\tG[deg/s] %+7.2f %+7.2f %+7.2f | T %.2f C\n",
-                si.ax_g, si.ay_g, si.az_g, si.gx_dps, si.gy_dps, si.gz_dps, si.temp_c);
-
-        sleep_ms(50);
-    }
-
-    close(fd);
-
+    // if (mpu6050_init(fd, &imu) < 0) {
+    //     close(fd);
+    //     return 1;
+    // }
+    //
+    // for (size_t i = 0; i < 0; i++) {
+    //     mpu6050_raw_t raw;
+    //     mpu6050_si_t si;
+    //
+    //     if (mpu6050_read_raw(fd, &imu, &raw) < 0) {
+    //         // fail to read raw
+    //         break;
+    //     }
+    //     mpu6050_convert_si(&imu, &raw, &si);
+    //
+    //     printf("\tA[g] %+7.3f %+7.3f %+7.3f |\n\tG[deg/s] %+7.2f %+7.2f %+7.2f | T %.2f C\n",
+    //             si.ax_g, si.ay_g, si.az_g, si.gx_dps, si.gy_dps, si.gz_dps, si.temp_c);
+    //
+    //     sleep_ms(50);
+    // }
+    //
+    // close(fd);
+    //
     return 0;
 
 }
