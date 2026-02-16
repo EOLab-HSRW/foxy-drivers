@@ -15,6 +15,7 @@
 #include <sys/ioctl.h>
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
+#include <linux/gpio.h>
 
 #include <math.h>
 #include <time.h>
@@ -338,7 +339,7 @@ typedef enum {
     PERIPH_ENCODER    = 3,
     PERIPH_TOF        = 4,
     PERIPH_DISPLAY    = 5,
-    PERIPH_BUTTON     = 6,
+    PERIPH_GPIO     = 6,
     PERIPH_IMU        = 7,
     PERIPH_LED        = 8,
 } peripheral_type_t;
@@ -434,6 +435,9 @@ typedef struct {
 // Convenience helper to initlialize primary peripheral 
 #define PRI_I2C(_adapter, _addr) \
     (peripheral_primary_t){.iface=IFACE_I2C, .u.i2c={ .adapter=(_adapter), .addr=(_addr) } }
+
+#define PRI_GPIO(_chip, _offset, _active_low) \
+    (peripheral_primary_t){.iface=IFACE_GPIO, .u.gpio={ .line={ .chip=(_chip), .offset=(_offset), .active_low=(_active_low) } } }
 
 #define PRI_SPI(_dev, _hz, _mode) \
     (peripheral_primary_t){.iface=IFACE_SPI, .u.spi={ .dev=(_dev), .hz=(_hz), .mode=(_mode) } }
@@ -535,7 +539,7 @@ static const char *type_to_string(peripheral_type_t t) {
         case PERIPH_ENCODER:    return "encoder";
         case PERIPH_TOF:        return "tof";
         case PERIPH_DISPLAY:    return "display";
-        case PERIPH_BUTTON:     return "button";
+        case PERIPH_GPIO:       return "gpio";
         case PERIPH_IMU:        return "imu";
         case PERIPH_LED:        return "led";
         default:                return "none";
@@ -701,6 +705,15 @@ static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
         .num_aux = 0,
         .props = imu_props,
         .num_props = (uint16_t)(sizeof(imu_props)/sizeof(imu_props[0])),
+    },
+
+    {
+        .type = PERIPH_GPIO,
+        .name = "top_button",
+        .driver = "gpio",
+        .flags = PERIPH_FLAG_NONE,
+        .primary = PRI_GPIO("/dev/gpiochip0", 78, false),
+        .num_aux = 0,
     },
 };
 
@@ -1500,8 +1513,6 @@ static void robot_slot_release(robot_t *r, uint16_t idx) {
         return;
     }
 
-    if (s->ctx) return;
-
     if (s->driver && s->driver->unbind) s->driver->unbind(s->ctx);
     s->ctx = NULL;
     s->driver = NULL;
@@ -1808,10 +1819,243 @@ static void imu_mpu6050_umbind(void *p) {
     free(ctx);
 }
 
+// ---------------------- GPIO PUBLIC -----------------------------
+
+typedef struct gpio_ops gpio_ops_t;
+
+typedef struct {
+    const gpio_ops_t *ops;
+    void *ctx;
+    uint16_t _idx; // slot index
+} gpio_t;
+
+struct gpio_ops {
+    int (*set_dir)(void *ctx, bool output);
+    int (*set_active_low)(void *ctx, bool active_low);
+    int (*read)(void *ctx, int *out_value);     // 0/1
+    int (*write)(void *ctx, int value);         // 0/1
+};
+
+gpio_t gpio_init(robot_t *r) {
+    gpio_t out = (gpio_t){0};
+    if (!r || !r->def) return out;
+
+    uint16_t idx;
+    if (robot_find_first_index(r, PERIPH_GPIO, &idx) != 0) return out;
+    if (robot_slot_acquire(r, idx) != 0) return out;
+
+    robot_slot_t *s = &r->slots[idx];
+    if (!s->ctx || !s->driver || !s->driver->ops) return out;
+
+    out.ops = (const gpio_ops_t *)s->driver->ops;
+    out.ctx = s->ctx;
+    out._idx = idx;
+    return out;
+}
+
+void gpio_deinit(robot_t *r, gpio_t *h) {
+    if (!r || !h || !h->ctx) return;
+    if (h->_idx < r->nslots) robot_slot_release(r, h->_idx);
+    *h = (gpio_t){0};
+}
+
+int gpio_set_as_input(gpio_t g) {
+    if (!g.ops || !g.ops->set_dir || !g.ctx) return -ENODEV;
+    return g.ops->set_dir(g.ctx, false);
+}
+
+int gpio_set_as_output(gpio_t g) {
+    if (!g.ops || !g.ops->set_dir || !g.ctx) return -ENODEV;
+    return g.ops->set_dir(g.ctx, true);
+}
+
+int gpio_set_active_low(gpio_t g) {
+    if (!g.ops || !g.ops->set_active_low || !g.ctx) return -ENODEV;
+    return g.ops->set_active_low(g.ctx, true);
+}
+
+int gpio_set_active_high(gpio_t g) {
+    if (!g.ops || !g.ops->set_active_low || !g.ctx) return -ENODEV;
+    return g.ops->set_active_low(g.ctx, false);
+}
+
+/* returns: 0/1 on success, <0 on error */
+int gpio_read(gpio_t g) {
+    if (!g.ops || !g.ops->read || !g.ctx) return -ENODEV;
+    int v = 0;
+    int rc = g.ops->read(g.ctx, &v);
+    if (rc < 0) return rc;
+    return (v != 0);
+}
+
+int gpio_write(gpio_t g, int value) {
+    if (!g.ops || !g.ops->write || !g.ctx) return -ENODEV;
+    return g.ops->write(g.ctx, value ? 1 : 0);
+}
+
+
+// ========================================================================================
+// GPIO (linux gpio chardev v1 via <linux/gpio.h>)
+// ========================================================================================
+
+typedef struct {
+    int chip_fd;       // fd for /dev/gpiochipN
+    int line_fd;       // fd for the requested line handle
+    char chip_path[128];
+    uint32_t offset;
+
+    bool active_low;
+    bool is_output;
+    int last_output;   // remembered default value when re-requesting
+} gpiochip_line_ctx_t;
+
+static void gpiochip_line_close_line(gpiochip_line_ctx_t *ctx) {
+    if (!ctx) return;
+    if (ctx->line_fd >= 0) close(ctx->line_fd);
+    ctx->line_fd = -1;
+}
+
+static int gpiochip_line_request(gpiochip_line_ctx_t *ctx) {
+    if (!ctx || ctx->chip_fd < 0) return -EINVAL;
+
+    gpiochip_line_close_line(ctx);
+
+    struct gpiohandle_request req;
+    memset(&req, 0, sizeof(req));
+
+    req.lineoffsets[0] = ctx->offset;
+    req.lines = 1;
+
+    req.flags = ctx->is_output ? GPIOHANDLE_REQUEST_OUTPUT : GPIOHANDLE_REQUEST_INPUT;
+    if (ctx->active_low) req.flags |= GPIOHANDLE_REQUEST_ACTIVE_LOW;
+
+    if (ctx->is_output) req.default_values[0] = (ctx->last_output ? 1 : 0);
+
+    // optional label (helpful in debug tools)
+    snprintf(req.consumer_label, sizeof(req.consumer_label), "robot-gpio");
+
+    if (ioctl(ctx->chip_fd, GPIO_GET_LINEHANDLE_IOCTL, &req) < 0) {
+        return -errno;
+    }
+
+    ctx->line_fd = req.fd;
+    return 0;
+}
+
+static int gpiochip_line_set_dir(void *p, bool output) {
+    gpiochip_line_ctx_t *ctx = (gpiochip_line_ctx_t *)p;
+    if (!ctx) return -EINVAL;
+
+    if (ctx->is_output == output && ctx->line_fd >= 0) return 0;
+    ctx->is_output = output;
+
+    // re-request with new direction
+    return gpiochip_line_request(ctx);
+}
+
+static int gpiochip_line_set_active_low(void *p, bool active_low) {
+    gpiochip_line_ctx_t *ctx = (gpiochip_line_ctx_t *)p;
+    if (!ctx) return -EINVAL;
+
+    if (ctx->active_low == active_low && ctx->line_fd >= 0) return 0;
+    ctx->active_low = active_low;
+
+    // re-request with new polarity
+    return gpiochip_line_request(ctx);
+}
+
+static int gpiochip_line_read(void *p, int *out_value) {
+    gpiochip_line_ctx_t *ctx = (gpiochip_line_ctx_t *)p;
+    if (!ctx || !out_value) return -EINVAL;
+    if (ctx->line_fd < 0) return -ENODEV;
+
+    struct gpiohandle_data data;
+    memset(&data, 0, sizeof(data));
+
+    if (ioctl(ctx->line_fd, GPIOHANDLE_GET_LINE_VALUES_IOCTL, &data) < 0) {
+        return -errno;
+    }
+
+    *out_value = data.values[0] ? 1 : 0;
+    return 0;
+}
+
+static int gpiochip_line_write(void *p, int value) {
+    gpiochip_line_ctx_t *ctx = (gpiochip_line_ctx_t *)p;
+    if (!ctx) return -EINVAL;
+    if (ctx->line_fd < 0) return -ENODEV;
+    if (!ctx->is_output) return -EPERM;
+
+    struct gpiohandle_data data;
+    memset(&data, 0, sizeof(data));
+    data.values[0] = value ? 1 : 0;
+
+    if (ioctl(ctx->line_fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &data) < 0) {
+        return -errno;
+    }
+
+    ctx->last_output = value ? 1 : 0;
+    return 0;
+}
+
+static const gpio_ops_t gpiochip_line_ops = {
+    .set_dir = gpiochip_line_set_dir,
+    .set_active_low = gpiochip_line_set_active_low,
+    .read = gpiochip_line_read,
+    .write = gpiochip_line_write,
+};
+
+static int gpiochip_line_bind(const peripheral_desc_t *desc, void **out_ctx) {
+    if (!desc || !out_ctx) return -EINVAL;
+    if (desc->type != PERIPH_GPIO) return -EINVAL;
+    if (desc->primary.iface != IFACE_GPIO) return -EINVAL;
+
+    const char *chip = desc->primary.u.gpio.line.chip;
+    uint32_t offset  = desc->primary.u.gpio.line.offset;
+    bool active_low  = desc->primary.u.gpio.line.active_low;
+
+    if (!chip || !chip[0]) return -EINVAL;
+
+    int chip_fd = open(chip, O_RDONLY | O_CLOEXEC);
+    if (chip_fd < 0) return -errno;
+
+    gpiochip_line_ctx_t *ctx = (gpiochip_line_ctx_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) { close(chip_fd); return -ENOMEM; }
+
+    ctx->chip_fd = chip_fd;
+    ctx->line_fd = -1;
+    ctx->offset = offset;
+    ctx->active_low = active_low;
+    ctx->is_output = false;     // default input
+    ctx->last_output = 0;
+    snprintf(ctx->chip_path, sizeof(ctx->chip_path), "%s", chip);
+
+    int rc = gpiochip_line_request(ctx);
+    if (rc < 0) {
+        gpiochip_line_close_line(ctx);
+        close(ctx->chip_fd);
+        free(ctx);
+        return rc;
+    }
+
+    *out_ctx = ctx;
+    return 0;
+}
+
+static void gpiochip_line_unbind(void *p) {
+    gpiochip_line_ctx_t *ctx = (gpiochip_line_ctx_t *)p;
+    if (!ctx) return;
+
+    gpiochip_line_close_line(ctx);
+    if (ctx->chip_fd >= 0) close(ctx->chip_fd);
+    free(ctx);
+}
+
 
 static const peripheral_driver_t global_drivers[] = {
     { .name="pca9685", .type=PERIPH_LED, .bind=led_pca9685_bind, .unbind=led_pca9685_unbind, .ops=&led_pca9685_ops },
     { .name="mpu6050", .type=PERIPH_IMU, .bind=imu_mpu6050_bind, .unbind=imu_mpu6050_umbind, .ops=&imu_mpu6050_ops },
+    { .name="gpio", .type=PERIPH_GPIO, .bind=gpiochip_line_bind, .unbind=gpiochip_line_unbind, .ops=&gpiochip_line_ops },
 
     // add more drivers here...
 };
@@ -1865,6 +2109,14 @@ int main(void) {
                 s.mag_uT[0], s.mag_uT[1], s.mag_uT[2],
                 s.temp_c);
         sleep_ms(50);
+    }
+
+    gpio_t button = gpio_init(&robot);
+    gpio_set_as_input(button);
+    for (size_t i = 0; i < 10; i++) {
+        int v = gpio_read(button);
+        printf("Button state: %d\n", v);
+        sleep_ms(500);
     }
     return 0;
 }
