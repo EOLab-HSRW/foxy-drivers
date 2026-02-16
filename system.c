@@ -36,7 +36,6 @@ typedef enum {
  * This define the specific model of 
  * with in a platform family.
  */
-
 typedef enum {
 	JETSON_MODEL_UNKNOWN   = 0,
 	JETSON_MODEL_NANO      = 1,
@@ -246,18 +245,6 @@ static rpi_model_t parse_rpi_model(const char *model_str)
 	if (model_str && contains_ci(model_str, "Compute Module 4"))return RPI_MODEL_CM4;
 	return RPI_MODEL_UNKNOWN;
 }
-
-/* ---------- DMI fallback for x86 ---------- */
-
-static int read_sysfs_string_first(char *out, size_t outsz, const char *a, const char *b)
-{
-	/* Try path a, then b */
-	if (read_dt_string(a, out, outsz) == 0) return 0;
-	if (b && read_dt_string(b, out, outsz) == 0) return 0;
-	return -1;
-}
-
-/* ---------- Public API ---------- */
 
 /**
  * platform_detect - Detect platform family + model on Linux.
@@ -713,6 +700,14 @@ static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
         .driver = "gpio",
         .flags = PERIPH_FLAG_NONE,
         .primary = PRI_GPIO("/dev/gpiochip0", 78, false),
+        .num_aux = 0,
+    },
+    {
+        .type = PERIPH_GPIO,
+        .name = "top_button_led",
+        .driver = "gpio",
+        .flags = PERIPH_FLAG_NONE,
+        .primary = PRI_GPIO("/dev/gpiochip0", 12, false),
         .num_aux = 0,
     },
 };
@@ -1456,6 +1451,64 @@ static const peripheral_driver_t *driver_find_exact(const char *name,
     return m;
 }
 
+// Count the number of peripherals attach to the robot
+// for a given type
+static size_t robot_count_type(const robot_t *r, peripheral_type_t type) {
+    if (!r || !r->def) return 0;
+    size_t n = 0;
+    for (size_t i = 0; i < r->def->num_peripherals; i++) {
+        if (r->def->peripherals[i].type == type) n++;
+    }
+    return n;
+}
+
+static void robot_warm_ambiguous_type(const robot_t *r,
+                                      peripheral_type_t type,
+                                      const char *api_name,
+                                      const char *matching_name) {
+    size_t n = robot_count_type(r, type);
+    if (n <= 1) return;
+    // TODO: show warning message
+    fprintf(stderr,
+            "warning: %s() found %zu peripherals of type '%s'."
+            "returning the first match that correspond to: '%s'."
+            "Use %s_name(r, ...) to init the intended peripheral unambiguously.\n",
+            api_name, n, type_to_string(type), matching_name, api_name);
+}
+
+static int robot_find_index(const robot_t *r,
+                            peripheral_type_t type,
+                            const char *name,
+                            const char *api_name, // used for logs
+                            uint16_t *out_idx) {
+    if (!r || !r->def || !out_idx) return -EINVAL;
+
+    if (!name || !name[0]) {
+        for (size_t i = 0; i < r->def->num_peripherals; i++) {
+            if (r->def->peripherals[i].type == type) {
+                *out_idx = (uint16_t)i;
+                robot_warm_ambiguous_type(r, type, api_name, r->def->peripherals[i].name);
+                return 0;
+            }
+        }
+        return -ENOENT;
+    }
+
+    uint16_t found = UINT16_MAX;
+    for (size_t i = 0; i < r->def->num_peripherals; i++) {
+        const peripheral_desc_t *p = &r->def->peripherals[i];
+        if (p->type != type) continue;
+        if (!p->name) continue;
+        if (strcmp(p->name, name) == 0) {
+            found = (uint16_t)i;
+        }
+    }
+
+    *out_idx = found;
+    return 0;
+}
+
+// DEPRECATED
 static int robot_find_first_index(const robot_t *r, peripheral_type_t type, uint16_t *out_idx) {
     if (!r || !r->def || !out_idx) return -1;
     for (size_t i = 0; i < r->def->num_peripherals; i++) {
@@ -1519,6 +1572,51 @@ static void robot_slot_release(robot_t *r, uint16_t idx) {
     s->refs = 0;
 }
 
+// Run validity checks on robot definition
+//
+// Steps:
+// 1) Validate each peripheral individualy
+// 2) All peripheral MUST HAVE a NAME
+// 3) The Name MUST BE UNIQUE
+static int robot_def_validate(const robot_def_t *def) {
+    if (!def || !def->peripherals) return -EINVAL;
+
+    for (size_t i = 0; i < def->num_peripherals; i++) {
+        const peripheral_desc_t *p = &def->peripherals[i];
+
+        // 1) verify each peripheral
+        peripheral_error_t pe = peripheral_validate_basic(p);
+        if (pe != PERIPH_OK) {
+            fprintf(stderr,
+                    "error: peripheral idx=%zu type=%s name=%s is invalid (%d)\n",
+                    i, type_to_string(p->type), p->name ? p->name : "(null)", (int)pe);
+            return -EINVAL; 
+        }
+
+        // 2) Check name
+        if (!p->name || !p->name[0]) {
+            fprintf(stderr,
+                    "error: peripheral idx=%zu type%s has empty name. "
+                    "All peripherals must have a name\n",
+                    i, type_to_string(p->type));
+            return -EINVAL;
+        }
+
+        // 3) Check name unique
+        for (size_t j = i + 1; j < def->num_peripherals; j++) {
+            const peripheral_desc_t *b = &def->peripherals[j];
+            if (p->type != b->type) continue;
+            if (strcmp(p->name, b->name) == 0) {
+                fprintf(stderr,
+                        "error: duplicate peripheral name (type=%s name=%s) at idx=%zu and idx=%zu\n",
+                        type_to_string(p->type), p->name, i, j);
+                return -EINVAL;
+            }
+        }
+    }
+    return 0;
+}
+
 // IMPORTANT PUBLIC FUNCTION
 // this function initlialize the robot definition by:
 // 1) Detecting the current platform
@@ -1541,6 +1639,8 @@ robot_t robot_init(void) {
     // does not show up in the I2C bus.
     hat_t hat = HAT_V3_15;
 
+    printf("check");
+
     const robot_def_t *def = NULL;
     if (robot_def_get(platform, hat, &def) != 0 || !def) {
         r.error = -ENODEV;
@@ -1548,6 +1648,14 @@ robot_t robot_init(void) {
     }
 
     r.def = def;
+
+    if (robot_def_validate(def) != 0) {
+        r.error = -EINVAL;
+        r.def = NULL;
+        r.nslots = 0;
+        return r;
+    }
+
     r.nslots = def->num_peripherals;
     if (r.nslots > ROBOT_MAX_PERIPHERALS) {
         r.error = -ENOMEM;
@@ -1578,13 +1686,12 @@ void robot_deinit(robot_t *r) {
     memset(r, 0, sizeof(*r));
 }
 
-led_t led_init(robot_t *r) {
+led_t led_init_name(robot_t *r, const char *name) {
     led_t out = {0};
     if (!r || !r->def) return out;
 
     uint16_t idx;
-    if (robot_find_first_index(r, PERIPH_LED, &idx) != 0) return out;
-
+    if (robot_find_index(r, PERIPH_LED, name, "led_init", &idx) != 0) return out;
     if (robot_slot_acquire(r, idx) != 0) return out;
 
     robot_slot_t *s = &r->slots[idx];
@@ -1594,6 +1701,11 @@ led_t led_init(robot_t *r) {
     out.ctx = s->ctx;
     out._idx = idx;
     return out;
+
+}
+
+led_t led_init(robot_t *r) {
+    return led_init_name(r, NULL);
 }
 
 void led_deinit(robot_t *r, led_t *h) {
@@ -1691,12 +1803,12 @@ static inline imu_sample_t imu_sample_zero(void) {
     return s;
 }
 
-imu_t imu_init(robot_t *r) {
+imu_t imu_init_name(robot_t *r, const char *name) {
     imu_t out = {0};
     if (!r || !r->def) return out;
 
     uint16_t idx;
-    if (robot_find_first_index(r, PERIPH_IMU, &idx) != 0) return out;
+    if (robot_find_index(r, PERIPH_IMU, name, "imu_init", &idx) != 0) return out;
     if (robot_slot_acquire(r, idx) != 0) return out;
 
     robot_slot_t *s = &r->slots[idx];
@@ -1707,6 +1819,10 @@ imu_t imu_init(robot_t *r) {
     out.ctx = s->ctx;
     out._idx = idx;
     return out;
+}
+
+imu_t imu_init(robot_t *r) {
+    return imu_init_name(r, NULL);
 }
 
 void imu_deinit(robot_t *r, imu_t *h) {
@@ -1836,12 +1952,12 @@ struct gpio_ops {
     int (*write)(void *ctx, int value);         // 0/1
 };
 
-gpio_t gpio_init(robot_t *r) {
+gpio_t gpio_init_name(robot_t *r, const char *name) {
     gpio_t out = (gpio_t){0};
     if (!r || !r->def) return out;
 
     uint16_t idx;
-    if (robot_find_first_index(r, PERIPH_GPIO, &idx) != 0) return out;
+    if (robot_find_index(r, PERIPH_GPIO, name, "gpio_init", &idx) != 0) return out;
     if (robot_slot_acquire(r, idx) != 0) return out;
 
     robot_slot_t *s = &r->slots[idx];
@@ -1851,6 +1967,10 @@ gpio_t gpio_init(robot_t *r) {
     out.ctx = s->ctx;
     out._idx = idx;
     return out;
+}
+
+gpio_t gpio_init(robot_t *r) {
+    return gpio_init_name(r, NULL);
 }
 
 void gpio_deinit(robot_t *r, gpio_t *h) {
@@ -2098,7 +2218,7 @@ int main(void) {
         return 1;
     }
 
-    for (size_t i = 0; i < 100; i++) {
+    for (size_t i = 0; i < 50; i++) {
         imu_sample_t s = imu_read(imu);
         printf("\tA[ms^2]  %+7.3f %+7.3f %+7.3f |\n"
                "\tG[deg/s] %+7.2f %+7.2f %+7.2f |\n"
@@ -2111,12 +2231,22 @@ int main(void) {
         sleep_ms(50);
     }
 
-    gpio_t button = gpio_init(&robot);
+    gpio_t button = gpio_init_name(&robot, "top_button");
     gpio_set_as_input(button);
     for (size_t i = 0; i < 10; i++) {
         int v = gpio_read(button);
         printf("Button state: %d\n", v);
         sleep_ms(500);
     }
+
+    gpio_t button_led = gpio_init_name(&robot, "top_button_led");
+    gpio_set_as_output(button_led);
+    for (size_t i = 0; i < 10; i++) {
+        gpio_write(button_led, 1);
+        sleep_ms(500);
+        gpio_write(button_led, 0);
+        sleep_ms(500);
+    }
+
     return 0;
 }
