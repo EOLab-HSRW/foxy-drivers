@@ -676,8 +676,8 @@ static const peripheral_kv_t motor1_props[] = {
     // the semantic in the same is:
     // <chip>_channel_<motor func>
     { "pca9685_ch_pwm", "8" }, 
-    { "pca9685_ch_in1", "9" },
-    { "pca9685_ch_in2", "10" },
+    { "pca9685_ch_in1", "10" },
+    { "pca9685_ch_in2", "9" },
     { "invert", "0" },
 };
 
@@ -711,9 +711,9 @@ static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
         .num_aux = 2,
         .aux = {
             { .role=ENDPOINT_ROLE_AUX0, .iface=IFACE_GPIO,
-              .u.gpio={ .line={.chip="/dev/gpiochip0", .offset=200, .active_low=false }}}, // physical pin 31 in the header
-            { .role=ENDPOINT_ROLE_AUX1, .iface=IFACE_GPIO,
               .u.gpio={ .line={.chip="/dev/gpiochip0", .offset=38, .active_low=false }}}, // physical pin 33 in the header
+            { .role=ENDPOINT_ROLE_AUX1, .iface=IFACE_GPIO,
+              .u.gpio={ .line={.chip="/dev/gpiochip0", .offset=200, .active_low=false }}}, // physical pin 31 in the header
         },
         .props = motor2_props,
         .num_props = (uint16_t)(sizeof(motor2_props)/sizeof(motor2_props[0])),
@@ -2468,12 +2468,12 @@ static int motor_hbridge_bind(const peripheral_desc_t *desc, void **out_ctx) {
         }
     } else {
         uint32_t ch_in1_u = 0, ch_in2_u = 0;
-        if (peripheral_prop_get_u32(desc, "ch_in1", &ch_in1_u) != 0) {
+        if (peripheral_prop_get_u32(desc, "pca9685_ch_in1", &ch_in1_u) != 0) {
             free(m);
             close(fd);
             return -EINVAL;
         }
-        if (peripheral_prop_get_u32(desc, "ch_in2", &ch_in2_u) != 0) {
+        if (peripheral_prop_get_u32(desc, "pca9685_ch_in2", &ch_in2_u) != 0) {
             free(m);
             close(fd);
             return -EINVAL;
@@ -2602,12 +2602,9 @@ int main(void) {
 
     motor_t m1 = motor_init_name(&robot, "motor1");
     motor_t m2 = motor_init_name(&robot, "motor2");
-    printf("running motor 1\n");
-    motor_set(m1, -0.75f);
-    sleep_ms(1000);
-    printf("running motor 2\n");
-    motor_set(m2, 0.65f);
-    sleep_ms(1000);
+    motor_set(m1, -0.40f);
+    motor_set(m2, -0.40f);
+    sleep_ms(500);
     motor_brake(m1);
     motor_brake(m2);
 
