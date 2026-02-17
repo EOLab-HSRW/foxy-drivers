@@ -322,7 +322,7 @@ static const char *family_to_string(platform_family_t f)
 typedef enum {
     PERIPH_NON        = 0,
     PERIPH_BATTERY    = 1,
-    PERIPH_MOTOR_CTRL = 2,
+    PERIPH_MOTOR      = 2,
     PERIPH_ENCODER    = 3,
     PERIPH_TOF        = 4,
     PERIPH_DISPLAY    = 5,
@@ -522,7 +522,7 @@ static const char *role_to_string(endpoint_role_t r) {
 static const char *type_to_string(peripheral_type_t t) {
     switch (t) {
         case PERIPH_BATTERY:    return "battery";
-        case PERIPH_MOTOR_CTRL: return "motor_ctrl";
+        case PERIPH_MOTOR:      return "motor";
         case PERIPH_ENCODER:    return "encoder";
         case PERIPH_TOF:        return "tof";
         case PERIPH_DISPLAY:    return "display";
@@ -530,6 +530,16 @@ static const char *type_to_string(peripheral_type_t t) {
         case PERIPH_IMU:        return "imu";
         case PERIPH_LED:        return "led";
         default:                return "none";
+    }
+}
+
+static const char *peripheral_error_to_string(peripheral_error_t e) {
+    switch (e) {
+        case PERIPH_ERROR_PRIMARY_NONE:  return "primary peripheral can't be of role none";
+        case PERIPH_ERROR_AUX_COUNT:     return "exceeding max number of aux peripherals endpoints";
+        case PERIPH_ERROR_AUX_ROLE_NONE: return "aux endpoints can't be of role none";
+        case PERIPH_ERROR_AUX_ROLE_DUP:  return "aux endpoints can't have duplicate roles";
+        case PERIPH_ERROR_AUX_IFACE_NONE: return "aux endpoint required a iface";
     }
 }
 
@@ -662,7 +672,53 @@ static const peripheral_kv_t imu_props[] = {
     { "sample_rate_div", "9" }, // default 9
 };
 
+static const peripheral_kv_t motor1_props[] = {
+    // the semantic in the same is:
+    // <chip>_channel_<motor func>
+    { "pca9685_ch_pwm", "8" }, 
+    { "pca9685_ch_in1", "9" },
+    { "pca9685_ch_in2", "10" },
+    { "invert", "0" },
+};
+
+static const peripheral_kv_t motor2_props[] = {
+    // the semantic in the same is:
+    // <chip>_channel_<motor func>
+    { "pca9685_ch_pwm", "13" },
+    { "invert", "0" },
+    // the IN1 and IN1 for this motors
+    // are better define as aux endpoints
+};
+
 static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
+    { 
+        .type = PERIPH_MOTOR,
+        .name = "motor1",
+        .driver = "motor_hbridge",
+        .flags = PERIPH_FLAG_NONE,
+        .primary = PRI_I2C("/dev/i2c-1", 0x60),
+        .num_aux = 0,
+        .props = motor1_props,
+        .num_props = (uint16_t)(sizeof(motor1_props)/sizeof(motor1_props[0])),
+    },
+
+    { 
+        .type = PERIPH_MOTOR,
+        .name = "motor2",
+        .driver = "motor_hbridge",
+        .flags = PERIPH_FLAG_NONE,
+        .primary = PRI_I2C("/dev/i2c-1", 0x60),
+        .num_aux = 2,
+        .aux = {
+            { .role=ENDPOINT_ROLE_AUX0, .iface=IFACE_GPIO,
+              .u.gpio={ .line={.chip="/dev/gpiochip0", .offset=200, .active_low=false }}}, // physical pin 31 in the header
+            { .role=ENDPOINT_ROLE_AUX1, .iface=IFACE_GPIO,
+              .u.gpio={ .line={.chip="/dev/gpiochip0", .offset=38, .active_low=false }}}, // physical pin 33 in the header
+        },
+        .props = motor2_props,
+        .num_props = (uint16_t)(sizeof(motor2_props)/sizeof(motor2_props[0])),
+    },
+
     { 
         .type = PERIPH_DISPLAY,
         .name = "display0",
@@ -708,6 +764,14 @@ static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
         .driver = "gpio",
         .flags = PERIPH_FLAG_NONE,
         .primary = PRI_GPIO("/dev/gpiochip0", 12, false),
+        .num_aux = 0,
+    },
+    {
+        .type = PERIPH_GPIO,
+        .name = "hat_builtin_led",
+        .driver = "gpio",
+        .flags = PERIPH_FLAG_NONE,
+        .primary = PRI_GPIO("/dev/gpiochip0", 77, false),
         .num_aux = 0,
     },
 };
@@ -794,7 +858,7 @@ void robot_def_dump(const robot_def_t *def, void *out) {
                 (unsigned)p->flags);
 
         if (val_error != PERIPH_OK) {
-            fprintf(fp, " (INVALID:%d)\n", (int)val_error);
+            fprintf(fp, " (error: %d) %s\n", (int)val_error, peripheral_error_to_string(val_error));
             continue;
         }
         fprintf(fp, "\n");
@@ -940,24 +1004,6 @@ static void sleep_ms(unsigned ms) {
     nanosleep(&ts, NULL);
 }
 
-// this is LUT table for gamma correction
-// to get "better" led colors
-static uint16_t gamma_lut[256];
-
-static void gamma_init(double gamma) {
-   uint16_t res_12bit = 4095; // 12-bit PWM on PCA9685
-   for (int i = 0; i < 256; i++) {
-       double x = (double)i / 255.0;
-       double y = pow(x, gamma);
-       long v12 = lround(y * (double)(res_12bit));
-       if (v12 < 0) v12 = 0;
-       if (v12 > res_12bit) v12 = res_12bit;
-       gamma_lut[i] = (uint16_t)v12;
-   }
-}
-
-
-
 // ========================================================================================
 /**
  * PERIPHERALS: Low-level functions
@@ -986,10 +1032,26 @@ static void gamma_init(double gamma) {
 #define PCA9685_TICKS_COUNT 4096
 #define PCA9685_TICKS_MAX (PCA9685_TICKS_COUNT - 1)
 
+// this is LUT table for gamma correction
+// to get "better" led colors
+static uint16_t gamma_lut[256];
+
+static void gamma_init(double gamma) {
+   uint16_t res_12bit = PCA9685_TICKS_MAX; // 12-bit PWM on PCA9685
+   for (int i = 0; i < 256; i++) {
+       double x = (double)i / 255.0;
+       double y = pow(x, gamma);
+       long v12 = lround(y * (double)(res_12bit));
+       if (v12 < 0) v12 = 0;
+       if (v12 > res_12bit) v12 = res_12bit;
+       gamma_lut[i] = (uint16_t)v12;
+   }
+}
+
 static uint8_t prescale_for_hz(double pwm_hz) {
     // prescale  = round(osc / (4096*hz)) - 1
     // Units: Hz / (counts * Hz) => unitless
-    double prescale_f = (PCA9685_OSC_HZ / (4096.0 * pwm_hz)) - 1.0;
+    double prescale_f = (PCA9685_OSC_HZ / ((float)PCA9685_TICKS_COUNT * pwm_hz)) - 1.0;
     long prescale = lround(prescale_f);
 
     if (prescale < 3) prescale = 3;
@@ -1031,6 +1093,11 @@ static int pca9685_init(int fd, uint8_t addr7, double pwm_hz) {
 
     // Put all the channels in OFF state
     // using FULL OFF bit.
+    // NOTE: on multiples intances of the PCA9685
+    // the binding operation with this function would 
+    // reset the state of all the outputs.
+    //
+    // this can be intended or not.
     uint8_t all_off[4] = {0x00, 0x00, 0x00, LED_FULL_ON_OFF_BIT };
     if (i2c_write_reg_bytes(fd, addr7, PCA9685_ALL_LED_ON_L, all_off, sizeof(all_off)) < 0) {
         return -1;
@@ -1053,7 +1120,7 @@ static int pca9685_set_pwm(int fd, uint8_t addr7, uint8_t channel, uint16_t on, 
         buf[1] = 0x00;                // ON_H
         buf[2] = 0x00;                // OFF_L
         buf[3] = LED_FULL_ON_OFF_BIT; // OFF_H with FULL OFF bit
-    } else if (off >= 4095) {
+    } else if (off >= PCA9685_TICKS_MAX) {
         buf[0] = 0x00;
         buf[1] = LED_FULL_ON_OFF_BIT;
         buf[2] = 0x00;
@@ -1382,9 +1449,8 @@ typedef struct peripheral_driver peripheral_driver_t;
 
 // binding slot: this is always 1:1 with def->peripherals[i]
 typedef struct {
-    const peripheral_desc_t *desc;
     const peripheral_driver_t *driver;
-    void *ctx;  // NUL if not bound
+    void *ctx;  // NULL if not bound
     uint16_t refs; // refcount per process
 } robot_slot_t;
 
@@ -1508,26 +1574,14 @@ static int robot_find_index(const robot_t *r,
     return 0;
 }
 
-// DEPRECATED
-static int robot_find_first_index(const robot_t *r, peripheral_type_t type, uint16_t *out_idx) {
-    if (!r || !r->def || !out_idx) return -1;
-    for (size_t i = 0; i < r->def->num_peripherals; i++) {
-        const peripheral_desc_t *p = &r->def->peripherals[i];
-        if (p->type == type) {
-            *out_idx = (uint16_t)i;
-            return 0;
-        }
-    }
-    return -1;
-}
-
 // binding slot to a peripheal description
 static int robot_slot_acquire(robot_t *r, uint16_t idx) {
     if (!r || !r->def) return -EINVAL;
     if (idx >= r->nslots) return -EINVAL;
 
     robot_slot_t *s = &r->slots[idx];
-    const peripheral_desc_t *p = s->desc;
+    // const peripheral_desc_t *p = s->desc;
+    const peripheral_desc_t *p = &r->def->peripherals[idx];
 
     if (s->ctx) { s->refs++; return 0; }
 
@@ -1588,8 +1642,8 @@ static int robot_def_validate(const robot_def_t *def) {
         peripheral_error_t pe = peripheral_validate_basic(p);
         if (pe != PERIPH_OK) {
             fprintf(stderr,
-                    "error: peripheral idx=%zu type=%s name=%s is invalid (%d)\n",
-                    i, type_to_string(p->type), p->name ? p->name : "(null)", (int)pe);
+                    "error: peripheral idx=%zu type=%s name=%s is invalid (error %d) %s\n",
+                    i, type_to_string(p->type), p->name ? p->name : "(null)", (int)pe, peripheral_error_to_string(pe));
             return -EINVAL; 
         }
 
@@ -1665,7 +1719,6 @@ robot_t robot_init(void) {
     }
 
     for (size_t i = 0; i < r.nslots; i++) {
-        r.slots[i].desc = &def->peripherals[i];
         r.slots[i].driver = NULL;
         r.slots[i].ctx = NULL;
         r.slots[i].refs = 0;
@@ -2171,13 +2224,303 @@ static void gpiochip_line_unbind(void *p) {
     free(ctx);
 }
 
+// ---------------------- MOTOR PUBLIC -----------------------------
+
+typedef struct motor_ops motor_ops_t;
+
+typedef struct {
+    const motor_ops_t *ops;
+    void *ctx;
+    uint16_t _idx;
+} motor_t;
+
+struct motor_ops {
+    int (*set)(void *ctx, float power); // normalized from -1 to +1
+    int (*stop)(void *ctx);
+    int (*brake)(void *ctx);
+};
+
+static inline int motor_set(motor_t m, float power) {
+    if (!m.ops || !m.ops->set || !m.ctx) return -ENODEV;
+    return m.ops->set(m.ctx, power);
+}
+
+static inline int motor_stop(motor_t m) {
+    if (!m.ops || !m.ops->stop || !m.ctx) return -ENODEV;
+    return m.ops->stop(m.ctx);
+}
+
+static inline int motor_brake(motor_t m) {
+    if (!m.ops || !m.ctx) return -ENODEV;
+    if (m.ops->brake) return m.ops->brake(m.ctx);
+    return motor_stop(m);
+}
+
+motor_t motor_init_name(robot_t *r, const char *name) {
+    motor_t out = (motor_t){0};
+    if (!r || !r->def) return out;
+
+    uint16_t idx;
+    if (robot_find_index(r, PERIPH_MOTOR, name, "motor_init", &idx) != 0) return out;
+    if (robot_slot_acquire(r, idx) != 0) return out;
+
+    robot_slot_t *s = &r->slots[idx];
+    if (!s->ctx || !s->driver || !s->driver->ops) return out;
+
+    out.ops = (const motor_ops_t *)s->driver->ops;
+    out.ctx = s->ctx;
+    out._idx = idx;
+    return out;
+}
+
+motor_t motor_init(robot_t *r) {
+    return motor_init_name(r, NULL);
+}
+void motor_deinit(robot_t *r, motor_t *m) {
+    if (!r || !m || !m->ctx) return;
+    if (m->_idx < r->nslots) robot_slot_release(r, m->_idx);
+    *m = (motor_t){0};
+}
+
+static float clampf(float x, float lo, float hi) {
+    if (x < lo) return lo;
+    if (x > hi) return hi;
+    return x;
+}
+
+static uint16_t duty_from_power(float power, float max_duty) {
+    power = clampf(power, 0.0f, 1.0f);
+    long v = lroundf(power * max_duty);
+    if (v < 0) v = 0;
+    if (v > max_duty) v = (uint16_t)max_duty;
+    return (uint16_t)v;
+}
+
+static int pca_set_digital(int fd, uint8_t addr7, uint8_t ch, int level) {
+    return pca9685_set_pwm(fd, addr7, ch, 0, level ? PCA9685_TICKS_MAX : 0);
+}
+
+typedef enum {
+    MOTOR_DIR_PCA = 0,
+    MOTOR_DIR_GPIO = 1,
+} motor_dir_backend_t;
+
+typedef struct {
+    int fd;
+    uint8_t addr7;
+    uint8_t ch_pwm;
+    bool invert;
+    motor_dir_backend_t dir_kind;
+    union {
+        struct { uint8_t ch_in1; uint8_t ch_in2; } pca;
+        struct { gpiochip_line_ctx_t in1, in2; } gpio;
+    } dir;
+} motor_hbridge_ctx_t;
+
+static int motor_set_dir(motor_hbridge_ctx_t *m, int in1, int in2) {
+    if (!m) return -EINVAL;
+    if (m->dir_kind == MOTOR_DIR_PCA) {
+        if (pca_set_digital(m->fd, m->addr7, m->dir.pca.ch_in1, in1) < 0) return -errno;
+        if (pca_set_digital(m->fd, m->addr7, m->dir.pca.ch_in2, in2) < 0) return -errno;
+        return 0;
+    } 
+    if (m->dir_kind == MOTOR_DIR_GPIO) {
+        if (gpiochip_line_write(&m->dir.gpio.in1, in1) < 0) return -errno;
+        if (gpiochip_line_write(&m->dir.gpio.in2, in2) < 0) return -errno;
+        return 0;
+    }
+}
+
+static int motor_set_pwm(motor_hbridge_ctx_t *m, uint16_t duty) {
+    if (!m) return -EINVAL;
+    if (pca9685_set_pwm(m->fd, m->addr7, m->ch_pwm, 0, duty) < 0) return -errno;
+    return 0;
+}
+
+static int gpiochip_line_ctx_open_output(gpiochip_line_ctx_t *ctx,
+                                         const gpio_desc_t *line,
+                                         int initial_value) {
+    if (!ctx || !line || !line->chip) return -EINVAL;
+    memset(ctx, 0, sizeof(*ctx));
+
+    int chip_fd = open(line->chip, O_RDONLY | O_CLOEXEC);
+    if (chip_fd < 0) return -errno;
+
+    ctx->chip_fd = chip_fd;
+    ctx->line_fd = -1;
+    ctx->offset = line->offset;
+    ctx->active_low = line->active_low;
+    ctx->is_output = true;
+    ctx->last_output = initial_value ? 1 : 0;
+    snprintf(ctx->chip_path, sizeof(ctx->chip_path), "%s", line->chip);
+
+    return gpiochip_line_request(ctx);
+}
+
+static void gpiochip_line_ctx_close_all(gpiochip_line_ctx_t *ctx) {
+    if (!ctx) return;
+    gpiochip_line_close_line(ctx);
+    if (ctx->chip_fd >= 0) close(ctx->chip_fd);
+    ctx->chip_fd = -1;
+}
+
+static int motor_hbridge_stop(void *p) {
+    motor_hbridge_ctx_t *m = (motor_hbridge_ctx_t *)p;
+    if (!m) return -EINVAL;
+    int rc = motor_set_pwm(m, 0);
+    if (rc < 0) return rc;
+    return motor_set_dir(m, 0, 0);
+}
+
+static int motor_hbridge_brake(void *p) {
+    motor_hbridge_ctx_t *m = (motor_hbridge_ctx_t *)p;
+    if (!m) return -EINVAL;
+    int rc = motor_set_pwm(m, 0);
+    if (rc < 0) return rc;
+    return motor_set_dir(m, 1, 1);
+}
+
+static int motor_hbridge_set(void *p, float power) {
+    motor_hbridge_ctx_t *m = (motor_hbridge_ctx_t *)p;
+    if (!m) return -EINVAL;
+
+    power = clampf(power, -1.0f, 1.0f);
+    if (m->invert) power = -power;
+
+    float a = fabsf(power);
+    if (a <= 0.0001f) return motor_hbridge_stop(p);
+
+    uint16_t duty = duty_from_power(a, PCA9685_TICKS_MAX);
+
+    int in1 = (power >= 0.0f) ? 1 : 0;
+    int in2 = (power >= 0.0f) ? 0 : 1;
+
+    int rc = motor_set_dir(m, in1, in2);
+    if (rc < 0) return rc;
+    return motor_set_pwm(m, duty);
+    return 0;
+}
+
+static const motor_ops_t motor_hbridge_ops = {
+    .set = motor_hbridge_set,
+    .stop = motor_hbridge_stop,
+    .brake = motor_hbridge_brake,
+};
+
+static int motor_hbridge_bind(const peripheral_desc_t *desc, void **out_ctx) {
+    if (!desc || !out_ctx) return -EINVAL;
+    if (desc->type != PERIPH_MOTOR) return -EINVAL;
+    if (desc->primary.iface != IFACE_I2C) return -EINVAL;
+
+    const char *adapter = desc->primary.u.i2c.adapter;
+    uint8_t addr7 = (uint8_t)(desc->primary.u.i2c.addr & 0x7F);
+
+    uint32_t ch_pwm_u = 0;
+    if (peripheral_prop_get_u32(desc, "pca9685_ch_pwm", &ch_pwm_u) != 0 || ch_pwm_u > 15) return -EINVAL;
+    uint8_t ch_pwm = (uint8_t)ch_pwm_u;
+
+    uint32_t invert_u = 0;
+    (void)peripheral_prop_get_u32(desc, "invert", &invert_u);
+    bool invert = (invert_u != 0);
+
+    int fd = open_i2c_fd(adapter);
+    if (fd < 0) return fd;
+
+    double pwm_hz = 1000.0;
+    if (pca9685_init(fd, addr7, pwm_hz) < 0) {
+        int e = errno ? -errno : -EIO;
+        close(fd);
+        return e;
+    }
+
+    motor_hbridge_ctx_t *m = (motor_hbridge_ctx_t *)calloc(1, sizeof(*m));
+    if (!m) { close(fd); return -ENOMEM; }
+
+    m->fd = fd;
+    m->addr7 = addr7;
+    m->ch_pwm = ch_pwm;
+    m->invert = invert;
+
+    const peripheral_aux_t *in1 = peripheral_get_aux(desc, ENDPOINT_ROLE_AUX0);
+    const peripheral_aux_t *in2 = peripheral_get_aux(desc, ENDPOINT_ROLE_AUX1);
+
+    if (in1 && in2) { // if BOTH means this is the GPIO dir backend
+        if (in1->iface != IFACE_GPIO || in2->iface != IFACE_GPIO) {
+            free(m);
+            close(fd);
+            return -EINVAL;
+        }
+        m->dir_kind = MOTOR_DIR_GPIO;
+
+        int rc = gpiochip_line_ctx_open_output(&m->dir.gpio.in1, &in1->u.gpio.line, 0);
+        if (rc < 0) { 
+            free(m);
+            close(fd);
+            return rc;
+        }
+
+        rc = gpiochip_line_ctx_open_output(&m->dir.gpio.in2, &in2->u.gpio.line, 0);
+        if (rc < 0) { 
+            gpiochip_line_ctx_close_all(&m->dir.gpio.in1);
+            free(m);
+            close(fd);
+            return rc;
+        }
+    } else {
+        uint32_t ch_in1_u = 0, ch_in2_u = 0;
+        if (peripheral_prop_get_u32(desc, "ch_in1", &ch_in1_u) != 0) {
+            free(m);
+            close(fd);
+            return -EINVAL;
+        }
+        if (peripheral_prop_get_u32(desc, "ch_in2", &ch_in2_u) != 0) {
+            free(m);
+            close(fd);
+            return -EINVAL;
+        }
+        if (ch_in1_u > 15 || ch_in2_u > 15) {
+            free(m);
+            close(fd);
+            return -EINVAL;
+        }
+
+        m->dir_kind = MOTOR_DIR_PCA;
+        m->dir.pca.ch_in1 = (uint8_t)ch_in1_u;
+        m->dir.pca.ch_in2 = (uint8_t)ch_in2_u;
+    }
+
+    // start safe
+    (void)motor_hbridge_stop(m);
+
+    *out_ctx = m;
+    return 0;
+}
+
+static void motor_hbridge_unbind(void *p) {
+    motor_hbridge_ctx_t *m = (motor_hbridge_ctx_t *)p;
+    if (!m) return;
+
+    (void)motor_hbridge_stop(m);
+
+    if (m->dir_kind == MOTOR_DIR_GPIO) {
+        gpiochip_line_ctx_close_all(&m->dir.gpio.in1);
+        gpiochip_line_ctx_close_all(&m->dir.gpio.in2);
+    }
+
+    if (m->fd >= 0) close(m->fd);
+    free(m);
+}
+
+
+// ======================= DRIVERS REGISTRY =======================
+
+
 
 static const peripheral_driver_t global_drivers[] = {
     { .name="pca9685", .type=PERIPH_LED, .bind=led_pca9685_bind, .unbind=led_pca9685_unbind, .ops=&led_pca9685_ops },
     { .name="mpu6050", .type=PERIPH_IMU, .bind=imu_mpu6050_bind, .unbind=imu_mpu6050_umbind, .ops=&imu_mpu6050_ops },
     { .name="gpio", .type=PERIPH_GPIO, .bind=gpiochip_line_bind, .unbind=gpiochip_line_unbind, .ops=&gpiochip_line_ops },
-
-    // add more drivers here...
+    { .name="motor_hbridge", .type=PERIPH_MOTOR, .bind=motor_hbridge_bind, .unbind=motor_hbridge_unbind, .ops=&motor_hbridge_ops },
 };
 static const size_t global_num_drivers = sizeof(global_drivers)/sizeof(global_drivers[0]);
 
@@ -2243,10 +2586,30 @@ int main(void) {
     gpio_set_as_output(button_led);
     for (size_t i = 0; i < 10; i++) {
         gpio_write(button_led, 1);
-        sleep_ms(500);
+        sleep_ms(100);
         gpio_write(button_led, 0);
-        sleep_ms(500);
+        sleep_ms(100);
     }
+
+    gpio_t hat_led = gpio_init_name(&robot, "hat_builtin_led");
+    gpio_set_as_output(hat_led);
+    for (size_t i = 0; i < 10; i++) {
+        gpio_write(hat_led, 1);
+        sleep_ms(100);
+        gpio_write(hat_led, 0);
+        sleep_ms(100);
+    }
+
+    motor_t m1 = motor_init_name(&robot, "motor1");
+    motor_t m2 = motor_init_name(&robot, "motor2");
+    printf("running motor 1\n");
+    motor_set(m1, -0.75f);
+    sleep_ms(1000);
+    printf("running motor 2\n");
+    motor_set(m2, 0.65f);
+    sleep_ms(1000);
+    motor_brake(m1);
+    motor_brake(m2);
 
     return 0;
 }
