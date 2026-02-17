@@ -690,6 +690,10 @@ static const peripheral_kv_t motor2_props[] = {
     // are better define as aux endpoints
 };
 
+static const peripheral_kv_t motor_enc_props[] = {
+    { "ticks_per_rev", "360" }, // ticks per revolution
+};
+
 static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
     { 
         .type = PERIPH_MOTOR,
@@ -701,7 +705,26 @@ static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
         .props = motor1_props,
         .num_props = (uint16_t)(sizeof(motor1_props)/sizeof(motor1_props[0])),
     },
-
+    { 
+        .type = PERIPH_GPIO,
+        .name = "motor1_enc_a",
+        .driver = "no_driver",
+        .flags = PERIPH_FLAG_NONE,
+        .primary = PRI_GPIO("/dev/gpiochip0", 79, false), // physical pin 12
+        .num_aux = 0,
+        .props = motor_enc_props,
+        .num_props = (uint16_t)(sizeof(motor_enc_props)/sizeof(motor_enc_props[0])),
+    },
+    { 
+        .type = PERIPH_GPIO,
+        .name = "motor1_enc_b",
+        .driver = "no_driver",
+        .flags = PERIPH_FLAG_NONE,
+        .primary = PRI_GPIO("/dev/gpiochip0", 232, false), // physical pin 16
+        .num_aux = 0,
+        .props = motor_enc_props,
+        .num_props = (uint16_t)(sizeof(motor_enc_props)/sizeof(motor_enc_props[0])),
+    },
     { 
         .type = PERIPH_MOTOR,
         .name = "motor2",
@@ -717,6 +740,26 @@ static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
         },
         .props = motor2_props,
         .num_props = (uint16_t)(sizeof(motor2_props)/sizeof(motor2_props[0])),
+    },
+    { 
+        .type = PERIPH_GPIO,
+        .name = "motor2_enc_a",
+        .driver = "no_driver",
+        .flags = PERIPH_FLAG_NONE,
+        .primary = PRI_GPIO("/dev/gpiochip0", 76, false), // physical pin 35
+        .num_aux = 0,
+        .props = motor_enc_props,
+        .num_props = (uint16_t)(sizeof(motor_enc_props)/sizeof(motor_enc_props[0])),
+    },
+    { 
+        .type = PERIPH_GPIO,
+        .name = "motor2_enc_b",
+        .driver = "no_driver",
+        .flags = PERIPH_FLAG_NONE,
+        .primary = PRI_GPIO("/dev/gpiochip0", 51, false), // physical pin 36
+        .num_aux = 0,
+        .props = motor_enc_props,
+        .num_props = (uint16_t)(sizeof(motor_enc_props)/sizeof(motor_enc_props[0])),
     },
 
     { 
