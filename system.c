@@ -1,6 +1,23 @@
 /*
  * Build:
  *   gcc -std=c11 -Wall -Wextra -O2 system.c -o systm -lm
+ *
+ *
+ * Organization:
+ * - Small helper for platform introspection
+ * - Platform, model and Hat functions (platform_t)
+ * - peripherals denitions, errors code and helpers (peripheral_desc_t)
+ * - Robot definition (robot_def_t)
+ * - Linux helper for internal use on this drivers
+ *   - i2c
+ *   - gpio
+ * - Hardware specific function
+ *   - MPU6050
+ *   - ...
+ * - Robot (robot_t)
+ * - drivers
+ * - Resource handles - Capabilities, Init, Close and binding to (driver) implementations.
+ * - Drivers registry (global table with available driver)
  */
 
 /* Standard C Headers */
