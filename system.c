@@ -626,11 +626,13 @@ typedef enum {
 
 static const char *peripheral_error_to_string(peripheral_error_t e) {
     switch (e) {
-        case PERIPH_ERROR_PRIMARY_NONE:  return "primary peripheral can't be of role none";
-        case PERIPH_ERROR_AUX_COUNT:     return "exceeding max number of aux peripherals endpoints";
-        case PERIPH_ERROR_AUX_ROLE_NONE: return "aux endpoints can't be of role none";
-        case PERIPH_ERROR_AUX_ROLE_DUP:  return "aux endpoints can't have duplicate roles";
+        case PERIPH_OK:                   return "peripheral is ok";
+        case PERIPH_ERROR_PRIMARY_NONE:   return "primary peripheral can't be of role none";
+        case PERIPH_ERROR_AUX_COUNT:      return "exceeding max number of aux peripherals endpoints";
+        case PERIPH_ERROR_AUX_ROLE_NONE:  return "aux endpoints can't be of role none";
+        case PERIPH_ERROR_AUX_ROLE_DUP:   return "aux endpoints can't have duplicate roles";
         case PERIPH_ERROR_AUX_IFACE_NONE: return "aux endpoint required a iface";
+        default:                          return "unknown peripheral error";
     }
 }
 
@@ -1322,7 +1324,8 @@ static int mpu6050_init(int fd, mpu6050_t *dev) {
 
     // Let's check if the MPU6050 is actually there
     uint8_t who = 0;
-    if (i2c_write_reg_bytes(fd, dev->addr7, MPU6050_WHO_AM_I, &who, 1) < 0) return -1;
+    if (i2c_read_reg_u8(fd, dev->addr7, MPU6050_WHO_AM_I, &who) < 0) return -1;
+    if ((who & 0x7E) != 0x68) return -ENODEV;
 
     //
     if ((who & 0x7E) != 0x68) {
@@ -1850,6 +1853,7 @@ static int led_pca9685_bind(const peripheral_desc_t *desc, void **out_ctx) {
     (void)peripheral_prop_get_double(desc, "gamma", &gamma);
 
     int fd = open_i2c_fd(adapter);
+    if (fd < 0) return fd;
 
     static bool gamma_inited = false;
     if (!gamma_inited) {
@@ -1947,7 +1951,7 @@ static int imu_mpu6050_bind(const peripheral_desc_t *desc, void **out_ctx) {
     }
     if (peripheral_prop_get_u32(desc, "gyro_range", &v) == 0) {
         if (v > 3) v = 3;
-        dev.dlpf_cfg = (uint8_t)v;
+        dev.gyro_range = (mpu6050_gyro_range_t)v;
     }
     if (peripheral_prop_get_u32(desc, "dlpf_cfg", &v) == 0) {
         if (v > 6) v = 6;
@@ -1959,6 +1963,7 @@ static int imu_mpu6050_bind(const peripheral_desc_t *desc, void **out_ctx) {
     }
 
     int fd = open_i2c_fd(adapter);
+    if (fd < 0) return fd;
 
     if (mpu6050_init(fd, &dev) < 0) {
         int e = errno ? -errno : -EIO;
@@ -2190,6 +2195,7 @@ static int motor_set_dir(motor_hbridge_ctx_t *m, int in1, int in2) {
         if (gpiochip_line_write(&m->dir.gpio.in2, in2) < 0) return -errno;
         return 0;
     }
+    return -EINVAL;
 }
 
 static int motor_set_pwm(motor_hbridge_ctx_t *m, uint16_t duty) {
@@ -2460,7 +2466,7 @@ int gpio_set_as_output(gpio_t g) {
 int gpio_set_active_low(gpio_t g) {
     const gpio_ops_t *ops = (const gpio_ops_t *)g.ops;
     if (!ops || !ops->set_active_low || !g.ctx) return -ENODEV;
-    return ops->set_active_low(g.ctx, false);
+    return ops->set_active_low(g.ctx, true);
 }
 
 int gpio_set_active_high(gpio_t g) {
@@ -2531,7 +2537,10 @@ static resource_t resource_open(robot_t *r, peripheral_type_t type, const char *
     if (robot_slot_acquire(r, idx) != 0) return out;
 
     robot_slot_t *s = &r->slots[idx];
-    if (!s->ctx || !s->driver || !s->driver->ops) return out;
+    if (!s->ctx || !s->driver || !s->driver->ops) {
+        robot_slot_release(r, idx);
+        return out;
+    }
 
     out.ops = s->driver->ops;
     out.ctx = s->ctx;
