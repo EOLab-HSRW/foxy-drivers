@@ -170,10 +170,6 @@ static int dt_compatible_contains(const char *needle) {
 }
 
 // ========================================================================================
-// END SMALL HELPERS
-// ========================================================================================
-
-// ========================================================================================
 // PLATFORM - Denitions and Detections
 // ========================================================================================
 
@@ -331,7 +327,6 @@ typedef enum {
 // ========================================================================================
 // PERIPHERALS - Denitions, errors code and helpers
 // ========================================================================================
-
 
 /**
  * enum peripheral_type - Robot peripheral clases.
@@ -1506,6 +1501,11 @@ int vl53l0x_set_signal_rate_limit_mcps(int fd, float mcps) {
 // by additional code.
 #define ROBOT_MAX_PERIPHERALS 32
 
+
+
+
+
+
 typedef struct peripheral_driver peripheral_driver_t;
 
 // binding slot: this is always 1:1 with def->peripherals[i]
@@ -1524,23 +1524,7 @@ typedef struct {
 
 static inline int robot_ok(const robot_t *r) { return r && r->error == 0; }
 
-typedef struct led_ops led_ops_t;
 
-typedef struct {
-    const led_ops_t *ops;
-    void *ctx;
-    uint16_t _idx; // slot index
-} led_t;
-
-struct led_ops {
-    int (*set_rgb)(void *ctx, uint8_t idx, uint8_t r, uint8_t g, uint8_t b);
-};
-
-// PUBLIC API FUNCTION
-int led_set_rgb(led_t led, uint8_t idx, uint8_t r, uint8_t g, uint8_t b) {
-    if (!led.ops || !led.ops->set_rgb || !led.ctx) return -ENODEV;
-    return led.ops->set_rgb(led.ctx, idx, r, g, b);
-}
 
 // IMPORTANT: this is like a contract
 // that match peripheral driver+type with
@@ -1732,6 +1716,23 @@ static int robot_def_validate(const robot_def_t *def) {
     return 0;
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // IMPORTANT PUBLIC FUNCTION
 // this function initlialize the robot definition by:
 // 1) Detecting the current platform
@@ -1800,33 +1801,7 @@ void robot_deinit(robot_t *r) {
     memset(r, 0, sizeof(*r));
 }
 
-led_t led_init_name(robot_t *r, const char *name) {
-    led_t out = {0};
-    if (!r || !r->def) return out;
 
-    uint16_t idx;
-    if (robot_find_index(r, PERIPH_LED, name, "led_init", &idx) != 0) return out;
-    if (robot_slot_acquire(r, idx) != 0) return out;
-
-    robot_slot_t *s = &r->slots[idx];
-    if (!s->ctx || !s->driver || !s->driver->ops) return out;
-
-    out.ops = (const led_ops_t *)s->driver->ops;
-    out.ctx = s->ctx;
-    out._idx = idx;
-    return out;
-
-}
-
-led_t led_init(robot_t *r) {
-    return led_init_name(r, NULL);
-}
-
-void led_deinit(robot_t *r, led_t *h) {
-    if (!r || !h || !h->ctx) return;
-    if (h->_idx < r->nslots) robot_slot_release(r, h->_idx);
-    *h = (led_t){0};
-}
 
 typedef struct {
     int fd;
@@ -1842,9 +1817,6 @@ static int led_pca9685_set_rgb(void *p, uint8_t idx, uint8_t r, uint8_t g, uint8
     return 0;
 }
 
-static const led_ops_t led_pca9685_ops = {
-    .set_rgb =led_pca9685_set_rgb,
-};
 
 static int led_pca9685_bind(const peripheral_desc_t *desc, void **out_ctx) {
     if (!desc || !out_ctx) return -EINVAL;
@@ -1892,70 +1864,18 @@ static void led_pca9685_unbind(void *p) {
 }
 
 // -------------------- IMU PUBLIC --------------------
+
+typedef struct {
+    int fd;
+    mpu6050_t dev;
+} mpu6050_imu_ctx_t;
+
 typedef struct { 
     float accel_ms2[3]; // ax, ay, az
     float gyro_dps[3];  // gx, gy, gz
     float mag_uT[3];    // mx, my, my (zero if the given imu does not have it)
     float temp_c;
 } imu_sample_t;
-
-typedef struct imu_ops imu_ops_t;
-
-typedef struct {
-    const imu_ops_t *ops;
-    void *ctx;
-    uint16_t _idx; // slot index
-} imu_t;
-
-struct imu_ops {
-    int (*read)(void *ctx, imu_sample_t *out);
-};
-
-static inline imu_sample_t imu_sample_zero(void) {
-    imu_sample_t s;
-    memset(&s, 0, sizeof(s));
-    return s;
-}
-
-imu_t imu_init_name(robot_t *r, const char *name) {
-    imu_t out = {0};
-    if (!r || !r->def) return out;
-
-    uint16_t idx;
-    if (robot_find_index(r, PERIPH_IMU, name, "imu_init", &idx) != 0) return out;
-    if (robot_slot_acquire(r, idx) != 0) return out;
-
-    robot_slot_t *s = &r->slots[idx];
-
-    if (!s->ctx || !s->driver || !s->driver->ops) return out;
-
-    out.ops = (const imu_ops_t *)s->driver->ops;
-    out.ctx = s->ctx;
-    out._idx = idx;
-    return out;
-}
-
-imu_t imu_init(robot_t *r) {
-    return imu_init_name(r, NULL);
-}
-
-void imu_deinit(robot_t *r, imu_t *h) {
-    if (!r || !h || !h->ctx) return;
-    if (h->_idx < r->nslots) robot_slot_release(r, h->_idx);
-    *h = (imu_t){0};
-}
-
-imu_sample_t imu_read(imu_t imu) {
-    imu_sample_t s = imu_sample_zero();
-    if (!imu.ops || !imu.ops->read || !imu.ctx) return s;
-    (void)imu.ops->read(imu.ctx, &s);
-    return s;
-}
-
-typedef struct {
-    int fd;
-    mpu6050_t dev;
-} mpu6050_imu_ctx_t;
 
 static int imu_mpu6050_read(void *p, imu_sample_t *out) {
     if (!p || !out) return -EINVAL;
@@ -1984,9 +1904,6 @@ static int imu_mpu6050_read(void *p, imu_sample_t *out) {
     return 0;
 }
 
-static const imu_ops_t imu_mpu6050_ops = {
-    .read = imu_mpu6050_read,
-};
 
 static int imu_mpu6050_bind(const peripheral_desc_t *desc, void **out_ctx) {
     if (!desc || !out_ctx) return -EINVAL;
@@ -2051,81 +1968,7 @@ static void imu_mpu6050_umbind(void *p) {
 
 // ---------------------- GPIO PUBLIC -----------------------------
 
-typedef struct gpio_ops gpio_ops_t;
 
-typedef struct {
-    const gpio_ops_t *ops;
-    void *ctx;
-    uint16_t _idx; // slot index
-} gpio_t;
-
-struct gpio_ops {
-    int (*set_dir)(void *ctx, bool output);
-    int (*set_active_low)(void *ctx, bool active_low);
-    int (*read)(void *ctx, int *out_value);     // 0/1
-    int (*write)(void *ctx, int value);         // 0/1
-};
-
-gpio_t gpio_init_name(robot_t *r, const char *name) {
-    gpio_t out = (gpio_t){0};
-    if (!r || !r->def) return out;
-
-    uint16_t idx;
-    if (robot_find_index(r, PERIPH_GPIO, name, "gpio_init", &idx) != 0) return out;
-    if (robot_slot_acquire(r, idx) != 0) return out;
-
-    robot_slot_t *s = &r->slots[idx];
-    if (!s->ctx || !s->driver || !s->driver->ops) return out;
-
-    out.ops = (const gpio_ops_t *)s->driver->ops;
-    out.ctx = s->ctx;
-    out._idx = idx;
-    return out;
-}
-
-gpio_t gpio_init(robot_t *r) {
-    return gpio_init_name(r, NULL);
-}
-
-void gpio_deinit(robot_t *r, gpio_t *h) {
-    if (!r || !h || !h->ctx) return;
-    if (h->_idx < r->nslots) robot_slot_release(r, h->_idx);
-    *h = (gpio_t){0};
-}
-
-int gpio_set_as_input(gpio_t g) {
-    if (!g.ops || !g.ops->set_dir || !g.ctx) return -ENODEV;
-    return g.ops->set_dir(g.ctx, false);
-}
-
-int gpio_set_as_output(gpio_t g) {
-    if (!g.ops || !g.ops->set_dir || !g.ctx) return -ENODEV;
-    return g.ops->set_dir(g.ctx, true);
-}
-
-int gpio_set_active_low(gpio_t g) {
-    if (!g.ops || !g.ops->set_active_low || !g.ctx) return -ENODEV;
-    return g.ops->set_active_low(g.ctx, true);
-}
-
-int gpio_set_active_high(gpio_t g) {
-    if (!g.ops || !g.ops->set_active_low || !g.ctx) return -ENODEV;
-    return g.ops->set_active_low(g.ctx, false);
-}
-
-/* returns: 0/1 on success, <0 on error */
-int gpio_read(gpio_t g) {
-    if (!g.ops || !g.ops->read || !g.ctx) return -ENODEV;
-    int v = 0;
-    int rc = g.ops->read(g.ctx, &v);
-    if (rc < 0) return rc;
-    return (v != 0);
-}
-
-int gpio_write(gpio_t g, int value) {
-    if (!g.ops || !g.ops->write || !g.ctx) return -ENODEV;
-    return g.ops->write(g.ctx, value ? 1 : 0);
-}
 
 
 // ========================================================================================
@@ -2232,12 +2075,6 @@ static int gpiochip_line_write(void *p, int value) {
     return 0;
 }
 
-static const gpio_ops_t gpiochip_line_ops = {
-    .set_dir = gpiochip_line_set_dir,
-    .set_active_low = gpiochip_line_set_active_low,
-    .read = gpiochip_line_read,
-    .write = gpiochip_line_write,
-};
 
 static int gpiochip_line_bind(const peripheral_desc_t *desc, void **out_ctx) {
     if (!desc || !out_ctx) return -EINVAL;
@@ -2287,61 +2124,7 @@ static void gpiochip_line_unbind(void *p) {
 
 // ---------------------- MOTOR PUBLIC -----------------------------
 
-typedef struct motor_ops motor_ops_t;
 
-typedef struct {
-    const motor_ops_t *ops;
-    void *ctx;
-    uint16_t _idx;
-} motor_t;
-
-struct motor_ops {
-    int (*set)(void *ctx, float power); // normalized from -1 to +1
-    int (*stop)(void *ctx);
-    int (*brake)(void *ctx);
-};
-
-static inline int motor_set(motor_t m, float power) {
-    if (!m.ops || !m.ops->set || !m.ctx) return -ENODEV;
-    return m.ops->set(m.ctx, power);
-}
-
-static inline int motor_stop(motor_t m) {
-    if (!m.ops || !m.ops->stop || !m.ctx) return -ENODEV;
-    return m.ops->stop(m.ctx);
-}
-
-static inline int motor_brake(motor_t m) {
-    if (!m.ops || !m.ctx) return -ENODEV;
-    if (m.ops->brake) return m.ops->brake(m.ctx);
-    return motor_stop(m);
-}
-
-motor_t motor_init_name(robot_t *r, const char *name) {
-    motor_t out = (motor_t){0};
-    if (!r || !r->def) return out;
-
-    uint16_t idx;
-    if (robot_find_index(r, PERIPH_MOTOR, name, "motor_init", &idx) != 0) return out;
-    if (robot_slot_acquire(r, idx) != 0) return out;
-
-    robot_slot_t *s = &r->slots[idx];
-    if (!s->ctx || !s->driver || !s->driver->ops) return out;
-
-    out.ops = (const motor_ops_t *)s->driver->ops;
-    out.ctx = s->ctx;
-    out._idx = idx;
-    return out;
-}
-
-motor_t motor_init(robot_t *r) {
-    return motor_init_name(r, NULL);
-}
-void motor_deinit(robot_t *r, motor_t *m) {
-    if (!r || !m || !m->ctx) return;
-    if (m->_idx < r->nslots) robot_slot_release(r, m->_idx);
-    *m = (motor_t){0};
-}
 
 static float clampf(float x, float lo, float hi) {
     if (x < lo) return lo;
@@ -2462,11 +2245,6 @@ static int motor_hbridge_set(void *p, float power) {
     return 0;
 }
 
-static const motor_ops_t motor_hbridge_ops = {
-    .set = motor_hbridge_set,
-    .stop = motor_hbridge_stop,
-    .brake = motor_hbridge_brake,
-};
 
 static int motor_hbridge_bind(const peripheral_desc_t *desc, void **out_ctx) {
     if (!desc || !out_ctx) return -EINVAL;
@@ -2572,6 +2350,218 @@ static void motor_hbridge_unbind(void *p) {
     free(m);
 }
 
+// ========================================================================================
+// Resource handles - Capabilities, Init, Close and binding to implementations.
+// ========================================================================================
+
+
+// Unified resource handle
+typedef struct {
+    const void *ops;
+    void *ctx;
+    uint16_t _idx; // slot index
+} resource_t;
+
+
+//------------------------------------------------------
+// LED resource
+typedef struct led_ops led_ops_t;
+struct led_ops {
+    int (*set_rgb)(void *ctx, uint8_t idx, uint8_t r, uint8_t g, uint8_t b);
+};
+typedef resource_t led_t;
+
+// attach driver
+static const led_ops_t led_pca9685_ops = {
+    .set_rgb =led_pca9685_set_rgb,
+};
+
+int led_set_rgb(led_t led, uint8_t idx, uint8_t r, uint8_t g, uint8_t b) {
+    const led_ops_t *ops = (const led_ops_t *)led.ops;
+    if (!ops || !ops->set_rgb || !led.ctx) return -ENODEV;
+    return ops->set_rgb(led.ctx, idx, r, g, b);
+}
+
+//------------------------------------------------------
+// IMU resource
+typedef struct imu_ops imu_ops_t;
+
+
+struct imu_ops {
+    int (*read)(void *ctx, imu_sample_t *out);
+};
+typedef resource_t imu_t;
+
+static const imu_ops_t imu_mpu6050_ops = {
+    .read = imu_mpu6050_read,
+};
+
+static inline imu_sample_t imu_sample_zero(void) {
+    imu_sample_t s;
+    memset(&s, 0, sizeof(s));
+    return s;
+}
+
+imu_sample_t imu_read(imu_t imu) {
+    imu_sample_t s = imu_sample_zero();
+    const imu_ops_t *ops = (const imu_ops_t *)imu.ops;
+    if (!ops || !ops->read || !imu.ctx) return s;
+    (void)ops->read(imu.ctx, &s);
+    return s;
+}
+
+//------------------------------------------------------
+// GPIO resource
+typedef struct gpio_ops gpio_ops_t;
+struct gpio_ops {
+    int (*set_dir)(void *ctx, bool output);
+    int (*set_active_low)(void *ctx, bool active_low);
+    int (*read)(void *ctx, int *out_value);     // 0/1
+    int (*write)(void *ctx, int value);         // 0/1
+};
+typedef resource_t gpio_t;
+
+static const gpio_ops_t gpiochip_line_ops = {
+    .set_dir = gpiochip_line_set_dir,
+    .set_active_low = gpiochip_line_set_active_low,
+    .read = gpiochip_line_read,
+    .write = gpiochip_line_write,
+};
+
+int gpio_set_as_input(gpio_t g) {
+    const gpio_ops_t *ops = (const gpio_ops_t *)g.ops;
+    if (!ops || !ops->set_dir || !g.ctx) return -ENODEV;
+    return ops->set_dir(g.ctx, false);
+}
+
+int gpio_set_as_output(gpio_t g) {
+    const gpio_ops_t *ops = (const gpio_ops_t *)g.ops;
+    if (!ops || !ops->set_dir || !g.ctx) return -ENODEV;
+    return ops->set_dir(g.ctx, true);
+}
+
+int gpio_set_active_low(gpio_t g) {
+    const gpio_ops_t *ops = (const gpio_ops_t *)g.ops;
+    if (!ops || !ops->set_active_low || !g.ctx) return -ENODEV;
+    return ops->set_active_low(g.ctx, false);
+}
+
+int gpio_set_active_high(gpio_t g) {
+    const gpio_ops_t *ops = (const gpio_ops_t *)g.ops;
+    if (!ops || !ops->set_active_low || !g.ctx) return -ENODEV;
+    return ops->set_active_low(g.ctx, false);
+}
+
+/* returns: 0/1 on success, <0 on error */
+int gpio_read(gpio_t g) {
+    const gpio_ops_t *ops = (const gpio_ops_t *)g.ops;
+    if (!ops || !ops->read || !g.ctx) return -ENODEV;
+    int v = 0;
+    int rc = ops->read(g.ctx, &v);
+    if (rc < 0) return rc;
+    return (v != 0);
+}
+
+int gpio_write(gpio_t g, int value) {
+    const gpio_ops_t *ops = (const gpio_ops_t *)g.ops;
+    if (!ops || !ops->write || !g.ctx) return -ENODEV;
+    return ops->write(g.ctx, value ? 1 : 0);
+}
+
+//------------------------------------------------------
+// Motor resource
+typedef struct motor_ops motor_ops_t;
+struct motor_ops {
+    int (*set)(void *ctx, float power); // normalized from -1 to +1
+    int (*stop)(void *ctx);
+    int (*brake)(void *ctx);
+};
+typedef resource_t motor_t;
+
+static const motor_ops_t motor_hbridge_ops = {
+    .set = motor_hbridge_set,
+    .stop = motor_hbridge_stop,
+    .brake = motor_hbridge_brake,
+};
+
+static inline int motor_set(motor_t m, float power) {
+    const motor_ops_t *ops = (const motor_ops_t *)m.ops;
+    if (!ops || !ops->set || !m.ctx) return -ENODEV;
+    return ops->set(m.ctx, power);
+}
+
+static inline int motor_stop(motor_t m) {
+    const motor_ops_t *ops = (const motor_ops_t *)m.ops;
+    if (!ops || !ops->stop || !m.ctx) return -ENODEV;
+    return ops->stop(m.ctx);
+}
+
+static inline int motor_brake(motor_t m) {
+    const motor_ops_t *ops = (const motor_ops_t *)m.ops;
+    if (!ops || !m.ctx) return -ENODEV;
+    if (ops->brake) return ops->brake(m.ctx);
+    return motor_stop(m);
+}
+
+//------------------------------------------------------
+// Resource adquisition
+static resource_t resource_open(robot_t *r, peripheral_type_t type, const char *name, const char *api_name) {
+    resource_t out = {0};
+    if (!r || !r->def) return out;
+
+    uint16_t idx;
+    if (robot_find_index(r, type, name, api_name, &idx) != 0) return out;
+    if (robot_slot_acquire(r, idx) != 0) return out;
+
+    robot_slot_t *s = &r->slots[idx];
+    if (!s->ctx || !s->driver || !s->driver->ops) return out;
+
+    out.ops = s->driver->ops;
+    out.ctx = s->ctx;
+    out._idx = idx;
+    return out;
+}
+
+static void resource_close(robot_t *r, resource_t *h) {
+    if (!r || !h || !h->ctx) return;
+    if (h->_idx < r->nslots) robot_slot_release(r, h->_idx);
+    *h = (resource_t){0};
+}
+
+// initlialize led resource
+led_t led_init_name(robot_t *r, const char *name) {
+    return resource_open(r, PERIPH_LED, name, "led_init");
+}
+// close led resource
+void led_deinit(robot_t *r, led_t *h) {
+    resource_close(r, h);
+}
+
+imu_t imu_init_name(robot_t *r, const char *name) {
+    return resource_open(r, PERIPH_IMU, name, "imu_init");
+}
+void imu_deinit(robot_t *r, imu_t *h) {
+    resource_close(r, h);
+}
+
+gpio_t gpio_init_name(robot_t *r, const char *name) {
+    return resource_open(r, PERIPH_GPIO, name, "gpio_init");
+}
+void gpio_deinit(robot_t *r, gpio_t *h) {
+    resource_close(r, h);
+}
+
+motor_t motor_init_name(robot_t *r, const char *name) {
+    return resource_open(r, PERIPH_MOTOR, name, "motor_init");
+}
+
+void motor_deinit(robot_t *r, motor_t *m) {
+    resource_close(r, m);
+}
+
+
+
+
 
 // ======================= DRIVERS REGISTRY =======================
 
@@ -2597,7 +2587,7 @@ int main(void) {
 
     robot_def_dump(robot.def, stdout);
 
-    led_t leds = led_init(&robot);
+    led_t leds = led_init_name(&robot, "leds_front_and_rear");
     if (!leds.ctx) {
         // TODO: add message
         // fail to init led driver
@@ -2615,7 +2605,7 @@ int main(void) {
     }
     led_deinit(&robot, &leds);
 
-    imu_t imu = imu_init(&robot);
+    imu_t imu = imu_init_name(&robot, "imu0");
 
     if (!imu.ctx) {
         robot_deinit(&robot);
