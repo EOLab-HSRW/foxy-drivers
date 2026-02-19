@@ -1,30 +1,184 @@
 /*
  * Build:
- *   gcc -std=c11 -Wall -Wextra -O2 system.c -o systm
+ *   gcc -std=c11 -Wall -Wextra -O2 system.c -o systm -lm
  */
 
-#include <errno.h>
-#include <fcntl.h>
+/* Standard C Headers */
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <string.h>
-#include <unistd.h>
-#include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <time.h>
 
+/* POSIX / System Headers */
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <sys/ioctl.h>
+
+/* Linux Headers */
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
 #include <linux/gpio.h>
 
-#include <math.h>
-#include <time.h>
+// ========================================================================================
+// SMALL HELPERS - String, File, and Utility functions for platform identification
+// ========================================================================================
+
+/**
+ * Remove trailing whitespace (newline, carriage return, space, tab).
+ * @param s: The string to modify in-place.
+ */
+static void rstrip(char *s) {
+    size_t n;
+    if (!s) return;
+    n = strlen(s);
+    while (n > 0) {
+        char c = s[n - 1];
+        if (c == '\n' || c == '\r' || c == ' ' || c == '\t')
+            s[--n] = '\0';
+        else
+            break;
+    }
+}
+
+/**
+ * Convert a character to lowercase (ASCII only).
+ * @param c: The character to convert.
+ *
+ * @return: The lowercase equivalent if it is an uppercase letter, otherwise the character itself.
+ */
+static int ascii_tolower(int c) {
+    if (c >= 'A' && c <= 'Z') return c + ('a' - 'A');
+    return c;
+}
+
+/**
+ * Check if a case-insensitive substring exists.
+ * @param haystack: The string to search in.
+ * @param needle: The substring to search for.
+ *
+ * @return: 1 if found, 0 otherwise.
+ */
+static int contains_ci(const char *haystack, const char *needle) {
+    /* simple case-insensitive substring search (ASCII) */
+    size_t hlen, nlen;
+    size_t i, j;
+
+    if (!haystack || !needle) return 0;
+    hlen = strlen(haystack);
+    nlen = strlen(needle);
+    if (nlen == 0) return 1;
+    if (nlen > hlen) return 0;
+
+    for (i = 0; i + nlen <= hlen; i++) {
+        for (j = 0; j < nlen; j++) {
+            if (ascii_tolower((unsigned char)haystack[i + j]) !=
+                    ascii_tolower((unsigned char)needle[j]))
+                break;
+        }
+        if (j == nlen) return 1;
+    }
+    return 0;
+}
+
+/**
+ * Read a file into a buffer.
+ * @param path: Path to the file to read.
+ * @param buf: Output buffer to store file contents.
+ * @param bufsz: Size of the output buffer.
+ *
+ * @return: Number of bytes read (>=0), or -1 on error.
+ */
+static ssize_t read_file_bytes(const char *path, uint8_t *buf, size_t bufsz) {
+    int fd;
+    ssize_t n;
+
+    if (!path || !buf || bufsz == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+
+    n = read(fd, buf, bufsz);
+    close(fd);
+    return n;
+}
+
+/**
+ * Read a Device Tree string property (NUL-terminated in file).
+ *
+ * @param path: Path to the device tree file (e.g. "/proc/device-tree/model").
+ * @param out: Output buffer for the string.
+ * @param outsz: Size of the output buffer.
+ *
+ * @return: 0 on success, -1 on error.
+ */
+static int read_dt_string(const char *path, char *out, size_t outsz) {
+    uint8_t tmp[256];
+    ssize_t n;
+    size_t len;
+
+    if (!out || outsz == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    out[0] = '\0';
+
+    n = read_file_bytes(path, tmp, sizeof(tmp));
+    if (n <= 0) return -1;
+
+    /* DT strings are NUL-terminated; find first NUL or use n */
+    len = 0;
+    while (len < (size_t)n && tmp[len] != '\0') len++;
+
+    if (len >= outsz) len = outsz - 1;
+    memcpy(out, tmp, len);
+    out[len] = '\0';
+    rstrip(out);
+    return 0;
+}
+
+/**
+ * Check if "compatible" has a matching string.
+ *
+ * @param needle: Substring to find (case-insensitive) in the compatible string list.
+ *
+ * @return: 1 if found, 0 if not found or file not readable.
+ */
+static int dt_compatible_contains(const char *needle) {
+    uint8_t buf[1024];
+    ssize_t n = read_file_bytes("/proc/device-tree/compatible", buf, sizeof(buf));
+    size_t i = 0;
+
+    if (n <= 0 || !needle) return 0;
+
+    while (i < (size_t)n) {
+        const char *s = (const char *)&buf[i];
+        size_t max = (size_t)n - i;
+        size_t len = strnlen(s, max);
+        if (len == 0) break;
+
+        if (contains_ci(s, needle)) return 1;
+        i += len + 1;
+    }
+    return 0;
+}
+
+// ========================================================================================
+// END SMALL HELPERS
+// ========================================================================================
+
+// ========================================================================================
+// PLATFORM - Denitions and Detections
+// ========================================================================================
 
 /**
  * High-level platform family.
- * @PLATFORM_UNKNOWN: Unknown or not detected.
- * @PLATFORM_JETSON: NVIDIA Jetson family.
- * @PLATFORM_RASPBERRY: Raspberry Pi family.
  */
 typedef enum {
 	PLATFORM_UNKNOWN   = 0,
@@ -32,9 +186,17 @@ typedef enum {
 	PLATFORM_RASPBERRY = 2,
 } platform_family_t;
 
-/** Given the current platform family, 
- * This define the specific model of 
- * with in a platform family.
+static const char *family_to_string(platform_family_t f) {
+    switch (f) {
+        case PLATFORM_JETSON:    return "jetson";
+        case PLATFORM_RASPBERRY: return "raspberry";
+        default:                 return "unknown";
+    }
+}
+
+/** 
+ * Identifies the specific hardware variant within the Jetson
+ * platform family.
  */
 typedef enum {
 	JETSON_MODEL_UNKNOWN   = 0,
@@ -45,182 +207,7 @@ typedef enum {
 	JETSON_MODEL_AGX_ORIN  = 5
 } jetson_model_t;
 
-typedef enum {
-	RPI_MODEL_UNKNOWN = 0,
-	RPI_MODEL_PI4     = 1,
-	RPI_MODEL_PI5     = 2,
-	RPI_MODEL_CM4     = 3
-} rpi_model_t;
-
-/**
- * struct platform - Detected platform identity.
- * @family: platform family
- * @model: family-specific model code (cast based on family)
- */
-typedef struct {
-	platform_family_t family;
-	uint16_t model;
-} platform_t;
-
-/** The HAT on the robot represents
- * the "physical hardware contract" that
- * define how to interact with peripherals
- * that are connected to the HAT.
- *
- * e.g. IMU, buttons, leds, etc.
- *
- * this "physical hardware contract" can
- * be broken if the routering of the peripherals
- * change on hardware revision of the HAT.
- *
- * This should not happen frequently,
- * but it is good to have a safety net,
- * and this enum defines which "hardware contract"
- * is currently in effect.
- *
- * In case there is a change that breaks the contract
- * add a new entry to this enum.
- */
-typedef enum {
-	HAT_UNKNOWN   = 0,
-    HAT_V3_15     = 1, // HAT revision v3.15
-} hat_t;
-
-/* ---------- Small helpers ---------- */
-
-static void rstrip(char *s)
-{
-	size_t n;
-	if (!s) return;
-	n = strlen(s);
-	while (n > 0) {
-		char c = s[n - 1];
-		if (c == '\n' || c == '\r' || c == ' ' || c == '\t')
-			s[--n] = '\0';
-		else
-			break;
-	}
-}
-
-static int ascii_tolower(int c)
-{
-	if (c >= 'A' && c <= 'Z') return c + ('a' - 'A');
-	return c;
-}
-
-static int contains_ci(const char *haystack, const char *needle)
-{
-	/* simple case-insensitive substring search (ASCII) */
-	size_t hlen, nlen;
-	size_t i, j;
-
-	if (!haystack || !needle) return 0;
-	hlen = strlen(haystack);
-	nlen = strlen(needle);
-	if (nlen == 0) return 1;
-	if (nlen > hlen) return 0;
-
-	for (i = 0; i + nlen <= hlen; i++) {
-		for (j = 0; j < nlen; j++) {
-			if (ascii_tolower((unsigned char)haystack[i + j]) !=
-			    ascii_tolower((unsigned char)needle[j]))
-				break;
-		}
-		if (j == nlen) return 1;
-	}
-	return 0;
-}
-
-/**
- * read_file_bytes - Read a file into a buffer.
- * @path: path to read
- * @buf: output buffer
- * @bufsz: size of @buf
- *
- * Return: number of bytes read (>=0), or -1 on error.
- */
-static ssize_t read_file_bytes(const char *path, uint8_t *buf, size_t bufsz)
-{
-	int fd;
-	ssize_t n;
-
-	if (!path || !buf || bufsz == 0) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	fd = open(path, O_RDONLY);
-	if (fd < 0) return -1;
-
-	n = read(fd, buf, bufsz);
-	close(fd);
-	return n;
-}
-
-/**
- * read_dt_string - Read a Device Tree string property (NUL-terminated in file).
- * @path: e.g. "/proc/device-tree/model"
- * @out: output string
- * @outsz: size of @out
- *
- * Return: 0 on success, -1 on error.
- */
-static int read_dt_string(const char *path, char *out, size_t outsz)
-{
-	uint8_t tmp[256];
-	ssize_t n;
-	size_t len;
-
-	if (!out || outsz == 0) {
-		errno = EINVAL;
-		return -1;
-	}
-	out[0] = '\0';
-
-	n = read_file_bytes(path, tmp, sizeof(tmp));
-	if (n <= 0) return -1;
-
-	/* DT strings are NUL-terminated; find first NUL or use n */
-	len = 0;
-	while (len < (size_t)n && tmp[len] != '\0') len++;
-
-	if (len >= outsz) len = outsz - 1;
-	memcpy(out, tmp, len);
-	out[len] = '\0';
-	rstrip(out);
-	return 0;
-}
-
-/**
- * dt_compatible_contains - Check if any NUL-separated string in "compatible" matches.
- * @needle: substring to find (case-insensitive)
- *
- * Return: 1 if found, 0 if not found or file not readable.
- */
-static int dt_compatible_contains(const char *needle)
-{
-	uint8_t buf[1024];
-	ssize_t n = read_file_bytes("/proc/device-tree/compatible", buf, sizeof(buf));
-	size_t i = 0;
-
-	if (n <= 0 || !needle) return 0;
-
-	while (i < (size_t)n) {
-		const char *s = (const char *)&buf[i];
-		size_t max = (size_t)n - i;
-		size_t len = strnlen(s, max);
-		if (len == 0) break;
-
-		if (contains_ci(s, needle)) return 1;
-		i += len + 1;
-	}
-	return 0;
-}
-
-/* ---------- Model parsing heuristics ---------- */
-
-static jetson_model_t parse_jetson_model(const char *model_str)
-{
+static jetson_model_t parse_jetson_model(const char *model_str) {
 	/* Check specific tokens first (avoid "Orin Nano" matching "Nano") */
 	if (model_str && contains_ci(model_str, "AGX Orin"))   return JETSON_MODEL_AGX_ORIN;
 	if (model_str && contains_ci(model_str, "Orin NX"))    return JETSON_MODEL_ORIN_NX;
@@ -238,13 +225,32 @@ static jetson_model_t parse_jetson_model(const char *model_str)
 	return JETSON_MODEL_UNKNOWN;
 }
 
-static rpi_model_t parse_rpi_model(const char *model_str)
-{
+/**
+ * Raspberry Pi platform models.
+ */
+typedef enum {
+	RPI_MODEL_UNKNOWN = 0,
+	RPI_MODEL_PI4     = 1,
+	RPI_MODEL_PI5     = 2,
+	RPI_MODEL_CM4     = 3
+} rpi_model_t;
+
+static rpi_model_t parse_rpi_model(const char *model_str) {
 	if (model_str && contains_ci(model_str, "Raspberry Pi 5")) return RPI_MODEL_PI5;
 	if (model_str && contains_ci(model_str, "Raspberry Pi 4")) return RPI_MODEL_PI4;
 	if (model_str && contains_ci(model_str, "Compute Module 4"))return RPI_MODEL_CM4;
 	return RPI_MODEL_UNKNOWN;
 }
+
+/**
+ * struct platform - Detected platform identity.
+ * @family: platform family
+ * @model: family-specific model code (cast based on family)
+ */
+typedef struct {
+	platform_family_t family;
+	uint16_t model;
+} platform_t;
 
 /**
  * platform_detect - Detect platform family + model on Linux.
@@ -259,62 +265,73 @@ static rpi_model_t parse_rpi_model(const char *model_str)
  */
 static int platform_detect(platform_t *out, char *human, size_t humansz)
 {
-	char model[256] = {0};
+    char model[256] = {0};
 
-	if (!out) {
-		errno = EINVAL;
-		return -1;
-	}
+    if (!out) {
+        errno = EINVAL;
+        return -1;
+    }
 
-	out->family = PLATFORM_UNKNOWN;
-	out->model  = 0;
-	if (human && humansz) human[0] = '\0';
+    out->family = PLATFORM_UNKNOWN;
+    out->model  = 0;
+    if (human && humansz) human[0] = '\0';
 
-	/* 1) Device Tree: model string is usually enough for Jetson/RPi. :contentReference[oaicite:9]{index=9} */
-	if (read_dt_string("/proc/device-tree/model", model, sizeof(model)) == 0) {
+    /* 1) Device Tree: model string is usually enough for Jetson/RPi. :contentReference[oaicite:9]{index=9} */
+    if (read_dt_string("/proc/device-tree/model", model, sizeof(model)) == 0) {
 
-		if (contains_ci(model, "NVIDIA Jetson") || dt_compatible_contains("nvidia,jetson")) {
-			out->family = PLATFORM_JETSON;
-			out->model  = (uint16_t)parse_jetson_model(model);
-			if (human && humansz) {
-				strncpy(human, model, humansz - 1);
-				human[humansz - 1] = '\0';
-			}
-			return 0;
-		}
+        if (contains_ci(model, "NVIDIA Jetson") || dt_compatible_contains("nvidia,jetson")) {
+            out->family = PLATFORM_JETSON;
+            out->model  = (uint16_t)parse_jetson_model(model);
+            if (human && humansz) {
+                strncpy(human, model, humansz - 1);
+                human[humansz - 1] = '\0';
+            }
+            return 0;
+        }
 
-		if (contains_ci(model, "Raspberry Pi")) {
-			out->family = PLATFORM_RASPBERRY;
-			out->model  = (uint16_t)parse_rpi_model(model);
-			if (human && humansz) {
-				strncpy(human, model, humansz - 1);
-				human[humansz - 1] = '\0';
-			}
-			return 0;
-		}
+        if (contains_ci(model, "Raspberry Pi")) {
+            out->family = PLATFORM_RASPBERRY;
+            out->model  = (uint16_t)parse_rpi_model(model);
+            if (human && humansz) {
+                strncpy(human, model, humansz - 1);
+                human[humansz - 1] = '\0';
+            }
+            return 0;
+        }
 
-		/* Some other DT-based board */
-		out->family = PLATFORM_UNKNOWN;
-		out->model  = 0;
-		if (human && humansz) {
-			strncpy(human, model, humansz - 1);
-			human[humansz - 1] = '\0';
-		}
-		return 0;
-	}
+        /* Some other DT-based board */
+        out->family = PLATFORM_UNKNOWN;
+        out->model  = 0;
+        if (human && humansz) {
+            strncpy(human, model, humansz - 1);
+            human[humansz - 1] = '\0';
+        }
+        return 0;
+    }
 
-	/* Could not detect anything useful */
-	return -1;
+    /* Could not detect anything useful */
+    return -1;
 }
 
-static const char *family_to_string(platform_family_t f)
-{
-	switch (f) {
-	case PLATFORM_JETSON:    return "jetson";
-	case PLATFORM_RASPBERRY: return "raspberry";
-	default:                 return "unknown";
-	}
-}
+/**
+ * Robot HAT (Hardware Attached on Top) revision.
+ * @HAT_UNKNOWN: Unknown or not detected.
+ * @HAT_V3_15: HAT revision v3.15.
+ *
+ * The HAT defines the "physical hardware contract" for peripheral
+ * connections (IMU, buttons, LEDs, etc.). This enum tracks hardware
+ * revisions to ensure correct pinmuxing and peripheral routing.
+ */
+typedef enum {
+	HAT_UNKNOWN   = 0,
+    HAT_V3_15     = 1,
+} hat_t;
+
+
+// ========================================================================================
+// PERIPHERALS - Denitions, errors code and helpers
+// ========================================================================================
+
 
 /**
  * enum peripheral_type - Robot peripheral clases.
@@ -326,11 +343,24 @@ typedef enum {
     PERIPH_ENCODER    = 3,
     PERIPH_TOF        = 4,
     PERIPH_DISPLAY    = 5,
-    PERIPH_GPIO     = 6,
+    PERIPH_GPIO       = 6,
     PERIPH_IMU        = 7,
     PERIPH_LED        = 8,
 } peripheral_type_t;
 
+static const char *type_to_string(peripheral_type_t t) {
+    switch (t) {
+        case PERIPH_BATTERY:    return "battery";
+        case PERIPH_MOTOR:      return "motor";
+        case PERIPH_ENCODER:    return "encoder";
+        case PERIPH_TOF:        return "tof";
+        case PERIPH_DISPLAY:    return "display";
+        case PERIPH_GPIO:       return "gpio";
+        case PERIPH_IMU:        return "imu";
+        case PERIPH_LED:        return "led";
+        default:                return "none";
+    }
+}
 typedef enum {
     IFACE_NONE = 0,
     IFACE_I2C  = 1,
@@ -342,6 +372,20 @@ typedef enum {
     IFACE_V4L2 = 7,
     IFACE_CSI  = 8,
 } peripheral_iface_t;
+
+static const char *iface_to_string(peripheral_iface_t i) {
+    switch(i) {
+        case IFACE_I2C:  return "i2c";
+        case IFACE_SPI:  return "spi";
+        case IFACE_UART: return "uart";
+        case IFACE_GPIO: return "gpio";
+        case IFACE_PWM:  return "pwm";
+        case IFACE_USB:  return "usb";
+        case IFACE_V4L2: return "v4l2";
+        case IFACE_CSI:  return "csi";
+        default:         return "none";
+    }
+}
 
 typedef enum {
     PERIPH_FLAG_NONE     = 0,
@@ -366,6 +410,17 @@ typedef enum {
     ENDPOINT_ROLE_AUX1,
 } endpoint_role_t;
 
+static const char *role_to_string(endpoint_role_t r) {
+    switch(r) {
+        case ENDPOINT_ROLE_IRQ:    return "irq";
+        case ENDPOINT_ROLE_RESET:  return "reset";
+        case ENDPOINT_ROLE_ENABLE: return "enable";
+        case ENDPOINT_ROLE_AUX0:   return "ax0";
+        case ENDPOINT_ROLE_AUX1:   return "ax1";
+        default:                   return "none";
+    }
+}
+
 typedef struct {
     const char *chip; // e.g. "/dev/gpiochip0"
     uint32_t offset;    // offset
@@ -382,198 +437,6 @@ typedef union {
     struct { const char *dev;                                               } v4l2;
     struct { uint8_t port;        uint8_t lanes;                            } csi;
 } endpoint_u_t;
-
-typedef struct {
-    peripheral_iface_t iface;
-    endpoint_u_t u;
-} peripheral_primary_t;
-
-// for optional aux endpoints, unique roles, driver(s) may use or ignore.
-typedef struct {
-    endpoint_role_t role;
-    peripheral_iface_t iface;
-    endpoint_u_t u;
-} peripheral_aux_t;
-
-#define PERIPH_MAX_AUX 2
-
-/**
- * Single peripheral description.
- *
- * The idea: this is *metadata* the rest the
- * stack can use to bind to the right driver
- * and OS resources.
- */
-typedef struct {
-    peripheral_type_t type;
-    const char *name;   // this name is a human readable "label": "display0", "imu0", ...
-    const char *driver; // bind hint: "ssd1306", ... (optional)
-    uint32_t flags;     // peripheral_flags_t
-
-    peripheral_primary_t primary;
-
-    uint8_t num_aux;
-    peripheral_aux_t aux[PERIPH_MAX_AUX];
-
-    const peripheral_kv_t *props; // optional
-    uint16_t num_props;
-} peripheral_desc_t;
-
-// Convenience helper to initlialize primary peripheral 
-#define PRI_I2C(_adapter, _addr) \
-    (peripheral_primary_t){.iface=IFACE_I2C, .u.i2c={ .adapter=(_adapter), .addr=(_addr) } }
-
-#define PRI_GPIO(_chip, _offset, _active_low) \
-    (peripheral_primary_t){.iface=IFACE_GPIO, .u.gpio={ .line={ .chip=(_chip), .offset=(_offset), .active_low=(_active_low) } } }
-
-#define PRI_SPI(_dev, _hz, _mode) \
-    (peripheral_primary_t){.iface=IFACE_SPI, .u.spi={ .dev=(_dev), .hz=(_hz), .mode=(_mode) } }
-
-#define PRI_UART(_dev, _baud) \
-    (peripheral_primary_t){.iface=IFACE_UART, .u.uart={ .dev=(_dev), .baud=(_baud) } }
-
-#define PRI_V4L2(_dev) \
-    (peripheral_primary_t){.iface=IFACE_V4L2, .u.v4l2={ .dev=(_dev) } }
-
-#define PRI_CSI(_port, _lanes) \
-    (peripheral_primary_t){.iface=IFACE_CSI, .u.csi={.port=(_port), .lanes=(_lanes) } }
-
-// peripheral validation helper enum
-typedef enum {
-    PERIPH_OK = 0,
-    // there is not point of having a primary peripheral
-    // without an iface to interact with it.
-    PERIPH_ERROR_PRIMARY_NONE,
-
-    // this is to prevent blowup the aux endpoint
-    // of a peripheral with unnecessary aux(s).
-    PERIPH_ERROR_AUX_COUNT,
-
-    // aux endpoint on peripheral are not allowed to have role none, 
-    // this is "semantically" **important** for the "consumer driver"
-    // so driver can decide to use the aux endpoint in the peripheral
-    // given the role attach to it.
-    PERIPH_ERROR_AUX_ROLE_NONE, 
-
-    // duplicated role not allowed
-    // no need to have two aux endpoint for a peripheral
-    // that serve the same role.
-    PERIPH_ERROR_AUX_ROLE_DUP,  
-
-    // in the same way as PERIPH_ERROR_PRIMARY_NONE
-    // there is not point of having a aux endpoint for a peripheral
-    // if it does not have iface to interact with it.
-    PERIPH_ERROR_AUX_IFACE_NONE, 
-} peripheral_error_t;
-
-static peripheral_error_t peripheral_validate_basic(const peripheral_desc_t *d) {
-    if (!d) return PERIPH_ERROR_PRIMARY_NONE;
-    if (d->primary.iface == IFACE_NONE) return PERIPH_ERROR_PRIMARY_NONE;
-    if (d->num_aux > PERIPH_MAX_AUX) return PERIPH_ERROR_AUX_COUNT;
-
-    uint32_t seen = 0;
-    for (uint8_t i = 0; i < d->num_aux; i++) {
-        const peripheral_aux_t *a = &d->aux[i];
-        if (a->role == ENDPOINT_ROLE_NONE) return PERIPH_ERROR_AUX_ROLE_NONE;
-        if (a->iface == IFACE_NONE) return PERIPH_ERROR_AUX_IFACE_NONE;
-
-        // using bit set to track roles and check for 
-        // repited roles
-        uint32_t bit = 1u << (uint32_t)a->role;
-        if (seen & bit) return PERIPH_ERROR_AUX_ROLE_DUP;
-        seen |= bit;
-    }
-    return PERIPH_OK;
-}
-
-static const peripheral_aux_t *peripheral_get_aux(const peripheral_desc_t *d, endpoint_role_t role) {
-    if (!d || role == ENDPOINT_ROLE_NONE) return NULL;
-    for (uint8_t i = 0; i < d->num_aux; i++) {
-        if (d->aux[i].role == role) return &d->aux[i];
-    }
-    return NULL;
-}
-
-static const char *iface_to_string(peripheral_iface_t i) {
-    switch(i) {
-    case IFACE_I2C:  return "i2c";
-    case IFACE_SPI:  return "spi";
-    case IFACE_UART: return "uart";
-    case IFACE_GPIO: return "gpio";
-    case IFACE_PWM:  return "pwm";
-    case IFACE_USB:  return "usb";
-    case IFACE_V4L2: return "v4l2";
-    case IFACE_CSI:  return "csi";
-    default:         return "none";
-    }
-}
-
-static const char *role_to_string(endpoint_role_t r) {
-    switch(r) {
-        case ENDPOINT_ROLE_IRQ:    return "irq";
-        case ENDPOINT_ROLE_RESET:  return "reset";
-        case ENDPOINT_ROLE_ENABLE: return "enable";
-        case ENDPOINT_ROLE_AUX0:   return "ax0";
-        case ENDPOINT_ROLE_AUX1:   return "ax1";
-        default:                   return "none";
-    }
-}
-
-static const char *type_to_string(peripheral_type_t t) {
-    switch (t) {
-        case PERIPH_BATTERY:    return "battery";
-        case PERIPH_MOTOR:      return "motor";
-        case PERIPH_ENCODER:    return "encoder";
-        case PERIPH_TOF:        return "tof";
-        case PERIPH_DISPLAY:    return "display";
-        case PERIPH_GPIO:       return "gpio";
-        case PERIPH_IMU:        return "imu";
-        case PERIPH_LED:        return "led";
-        default:                return "none";
-    }
-}
-
-static const char *peripheral_error_to_string(peripheral_error_t e) {
-    switch (e) {
-        case PERIPH_ERROR_PRIMARY_NONE:  return "primary peripheral can't be of role none";
-        case PERIPH_ERROR_AUX_COUNT:     return "exceeding max number of aux peripherals endpoints";
-        case PERIPH_ERROR_AUX_ROLE_NONE: return "aux endpoints can't be of role none";
-        case PERIPH_ERROR_AUX_ROLE_DUP:  return "aux endpoints can't have duplicate roles";
-        case PERIPH_ERROR_AUX_IFACE_NONE: return "aux endpoint required a iface";
-    }
-}
-
-// helpers to parse props (peripheral properties)
-static const char *peripheral_prop_get(const peripheral_desc_t *d, const char *key) {
-    if (!d || !d->props || !key) return NULL;
-    for (uint16_t i = 0; i < d->num_props; i++) {
-        if (!d->props[i].key) continue;
-        if (strcmp(d->props[i].key, key) == 0) {
-            return d->props[i].value;
-        }
-    }
-    return NULL;
-}
-
-static int peripheral_prop_get_u32(const peripheral_desc_t *d, const char *key, uint32_t *out) {
-    const char *v = peripheral_prop_get(d, key);
-    if (!v || !out) return -1;
-    char *end = NULL;
-    unsigned long x =strtoul(v, &end, 0);
-    if (end == v) return -1;
-    *out = (uint32_t)x;
-    return 0;
-}
-
-static int peripheral_prop_get_double(const peripheral_desc_t *d, const char *key, double *out) {
-    const char *v = peripheral_prop_get(d, key);
-    if (!v || !out) return -1;
-    char *end = NULL;
-    double x = strtod(v, &end);
-    if (end == v) return -1;
-    *out = x;
-    return 0;
-}
 
 static void dump_endpoint_u(FILE *fp, peripheral_iface_t iface, const endpoint_u_t *u) {
     switch (iface) {
@@ -625,6 +488,164 @@ static void dump_endpoint_u(FILE *fp, peripheral_iface_t iface, const endpoint_u
             break;
     }
 }
+
+typedef struct {
+    peripheral_iface_t iface;
+    endpoint_u_t u;
+} peripheral_primary_t;
+
+#define PRI_I2C(_adapter, _addr) \
+    (peripheral_primary_t){.iface=IFACE_I2C, .u.i2c={ .adapter=(_adapter), .addr=(_addr) } }
+
+#define PRI_GPIO(_chip, _offset, _active_low) \
+    (peripheral_primary_t){.iface=IFACE_GPIO, .u.gpio={ .line={ .chip=(_chip), .offset=(_offset), .active_low=(_active_low) } } }
+
+#define PRI_SPI(_dev, _hz, _mode) \
+    (peripheral_primary_t){.iface=IFACE_SPI, .u.spi={ .dev=(_dev), .hz=(_hz), .mode=(_mode) } }
+
+#define PRI_UART(_dev, _baud) \
+    (peripheral_primary_t){.iface=IFACE_UART, .u.uart={ .dev=(_dev), .baud=(_baud) } }
+
+#define PRI_V4L2(_dev) \
+    (peripheral_primary_t){.iface=IFACE_V4L2, .u.v4l2={ .dev=(_dev) } }
+
+#define PRI_CSI(_port, _lanes) \
+    (peripheral_primary_t){.iface=IFACE_CSI, .u.csi={.port=(_port), .lanes=(_lanes) } }
+
+// for optional aux endpoints, unique roles, driver(s) may use or ignore.
+typedef struct {
+    endpoint_role_t role;
+    peripheral_iface_t iface;
+    endpoint_u_t u;
+} peripheral_aux_t;
+
+#define PERIPH_MAX_AUX 2
+
+/**
+ * Single peripheral description.
+ *
+ * The idea: this is *metadata* the rest the
+ * stack can use to bind to the right driver
+ * and OS resources.
+ */
+typedef struct {
+    peripheral_type_t type;
+    const char *name;   // this name is a human readable "label": "display0", "imu0", ...
+    const char *driver; // bind hint: "ssd1306", ... (optional)
+    uint32_t flags;     // peripheral_flags_t
+
+    peripheral_primary_t primary;
+
+    uint8_t num_aux;
+    peripheral_aux_t aux[PERIPH_MAX_AUX];
+
+    const peripheral_kv_t *props; // optional
+    uint16_t num_props;
+} peripheral_desc_t;
+
+
+static const peripheral_aux_t *peripheral_get_aux(const peripheral_desc_t *d, endpoint_role_t role) {
+    if (!d || role == ENDPOINT_ROLE_NONE) return NULL;
+    for (uint8_t i = 0; i < d->num_aux; i++) {
+        if (d->aux[i].role == role) return &d->aux[i];
+    }
+    return NULL;
+}
+
+
+// helpers to parse props (peripheral properties)
+static const char *peripheral_prop_get(const peripheral_desc_t *d, const char *key) {
+    if (!d || !d->props || !key) return NULL;
+    for (uint16_t i = 0; i < d->num_props; i++) {
+        if (!d->props[i].key) continue;
+        if (strcmp(d->props[i].key, key) == 0) {
+            return d->props[i].value;
+        }
+    }
+    return NULL;
+}
+
+static int peripheral_prop_get_u32(const peripheral_desc_t *d, const char *key, uint32_t *out) {
+    const char *v = peripheral_prop_get(d, key);
+    if (!v || !out) return -1;
+    char *end = NULL;
+    unsigned long x =strtoul(v, &end, 0);
+    if (end == v) return -1;
+    *out = (uint32_t)x;
+    return 0;
+}
+
+static int peripheral_prop_get_double(const peripheral_desc_t *d, const char *key, double *out) {
+    const char *v = peripheral_prop_get(d, key);
+    if (!v || !out) return -1;
+    char *end = NULL;
+    double x = strtod(v, &end);
+    if (end == v) return -1;
+    *out = x;
+    return 0;
+}
+
+typedef enum {
+    PERIPH_OK = 0,
+    // there is not point of having a primary peripheral
+    // without an iface to interact with it.
+    PERIPH_ERROR_PRIMARY_NONE,
+
+    // this is to prevent blowup the aux endpoint
+    // of a peripheral with unnecessary aux(s).
+    PERIPH_ERROR_AUX_COUNT,
+
+    // aux endpoint on peripheral are not allowed to have role none, 
+    // this is "semantically" **important** for the "consumer driver"
+    // so driver can decide to use the aux endpoint in the peripheral
+    // given the role attach to it.
+    PERIPH_ERROR_AUX_ROLE_NONE, 
+
+    // duplicated role not allowed
+    // no need to have two aux endpoint for a peripheral
+    // that serve the same role.
+    PERIPH_ERROR_AUX_ROLE_DUP,  
+
+    // in the same way as PERIPH_ERROR_PRIMARY_NONE
+    // there is not point of having a aux endpoint for a peripheral
+    // if it does not have iface to interact with it.
+    PERIPH_ERROR_AUX_IFACE_NONE, 
+} peripheral_error_t;
+
+static const char *peripheral_error_to_string(peripheral_error_t e) {
+    switch (e) {
+        case PERIPH_ERROR_PRIMARY_NONE:  return "primary peripheral can't be of role none";
+        case PERIPH_ERROR_AUX_COUNT:     return "exceeding max number of aux peripherals endpoints";
+        case PERIPH_ERROR_AUX_ROLE_NONE: return "aux endpoints can't be of role none";
+        case PERIPH_ERROR_AUX_ROLE_DUP:  return "aux endpoints can't have duplicate roles";
+        case PERIPH_ERROR_AUX_IFACE_NONE: return "aux endpoint required a iface";
+    }
+}
+
+static peripheral_error_t peripheral_validate_basic(const peripheral_desc_t *d) {
+    if (!d) return PERIPH_ERROR_PRIMARY_NONE;
+    if (d->primary.iface == IFACE_NONE) return PERIPH_ERROR_PRIMARY_NONE;
+    if (d->num_aux > PERIPH_MAX_AUX) return PERIPH_ERROR_AUX_COUNT;
+
+    uint32_t seen = 0;
+    for (uint8_t i = 0; i < d->num_aux; i++) {
+        const peripheral_aux_t *a = &d->aux[i];
+        if (a->role == ENDPOINT_ROLE_NONE) return PERIPH_ERROR_AUX_ROLE_NONE;
+        if (a->iface == IFACE_NONE) return PERIPH_ERROR_AUX_IFACE_NONE;
+
+        // using bit set to track roles and check for 
+        // repited roles
+        uint32_t bit = 1u << (uint32_t)a->role;
+        if (seen & bit) return PERIPH_ERROR_AUX_ROLE_DUP;
+        seen |= bit;
+    }
+    return PERIPH_OK;
+}
+
+
+// ========================================================================================
+// ROBOT (HARDWARE) DEFINITION - The composite definition of the robot hardware
+// ========================================================================================
 
 /**
  * Pack platform family + model + hat into a single key.
@@ -734,9 +755,9 @@ static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
         .num_aux = 2,
         .aux = {
             { .role=ENDPOINT_ROLE_AUX0, .iface=IFACE_GPIO,
-              .u.gpio={ .line={.chip="/dev/gpiochip0", .offset=38, .active_low=false }}}, // physical pin 33 in the header
+                .u.gpio={ .line={.chip="/dev/gpiochip0", .offset=38, .active_low=false }}}, // physical pin 33 in the header
             { .role=ENDPOINT_ROLE_AUX1, .iface=IFACE_GPIO,
-              .u.gpio={ .line={.chip="/dev/gpiochip0", .offset=200, .active_low=false }}}, // physical pin 31 in the header
+                .u.gpio={ .line={.chip="/dev/gpiochip0", .offset=200, .active_low=false }}}, // physical pin 31 in the header
         },
         .props = motor2_props,
         .num_props = (uint16_t)(sizeof(motor2_props)/sizeof(motor2_props[0])),
@@ -820,30 +841,29 @@ static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
 };
 
 #define ROBOT_ENTRY(FAMILY, MODEL, HAT, ID, NAME, PERIPHS) \
-    { \
-        .key = ROBOT_DEF_KEY((FAMILY), (uint16_t)(MODEL), (HAT)), \
-        .id = (ID), \
-        .display_name = (NAME), \
-        .platform_family = (FAMILY), \
-        .platform_model = (uint16_t)(MODEL), \
-        .hat = (HAT), \
-        .peripherals = (PERIPHS), \
-        .num_peripherals = sizeof(PERIPHS)/sizeof((PERIPHS)[0]), \
-    }
+{ \
+    .key = ROBOT_DEF_KEY((FAMILY), (uint16_t)(MODEL), (HAT)), \
+    .id = (ID), \
+    .display_name = (NAME), \
+    .platform_family = (FAMILY), \
+    .platform_model = (uint16_t)(MODEL), \
+    .hat = (HAT), \
+    .peripherals = (PERIPHS), \
+    .num_peripherals = sizeof(PERIPHS)/sizeof((PERIPHS)[0]), \
+}
 
 static const robot_def_t robot_table[] = {
     ROBOT_ENTRY(
-        PLATFORM_JETSON,
-        JETSON_MODEL_NANO,
-        HAT_V3_15,
-        "jetson-nano_hat_v3_15",
-        "Jetson Nano (HAT v3.15)",
-        jetson_nano_hat_v3_15
+            PLATFORM_JETSON,
+            JETSON_MODEL_NANO,
+            HAT_V3_15,
+            "jetson-nano_hat_v3_15",
+            "Jetson Nano (HAT v3.15)",
+            jetson_nano_hat_v3_15
     )
 };
 
-int robot_def_get(platform_t platform, hat_t hat, const robot_def_t **out)
-{
+int robot_def_get(platform_t platform, hat_t hat, const robot_def_t **out) {
     uint32_t key;
 
     if (!out)
@@ -1029,9 +1049,7 @@ static int open_i2c_fd(const char *file_descriptor) {
 }
 
 // ========================================================================================
-/**
- * UTILITY functions
- */
+// TIMING UTILITY FUNCTIONS
 // ========================================================================================
 
 static uint64_t mono_ms(void) {
