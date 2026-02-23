@@ -1508,9 +1508,13 @@ struct peripheral_driver {
     const void *ops; // this point to the available <driver>_ops_t.
 };
 
-/* forward declaration for global drivers registry */
-static const peripheral_driver_t global_drivers[];
-static const size_t global_num_drivers;
+/**
+ * C++-safe forward declarations for registry.
+ * Use extern here; static incomplete const declarations are treated as definitions in C++.
+ * These symbols exist only in the TU that defines FOXY_IMPLEMENTATION.
+ */
+extern const peripheral_driver_t global_drivers[];
+extern const size_t global_num_drivers;
 
 /**
  * driver lookup: exact-match only, deterministic
@@ -2540,14 +2544,15 @@ FOXY_API void motor_deinit(robot_t *r, motor_t *m) {
  * DRIVERS REGISTRY
  * ======================================================================================== */
 
-static const peripheral_driver_t global_drivers[] = {
+// static const peripheral_driver_t 
+const peripheral_driver_t global_drivers[] = {
     { .name="pca9685",      .type=PERIPH_LED,   .bind=led_pca9685_bind,   .unbind=led_pca9685_unbind, .ops=&led_pca9685_ops },
     { .name="mpu6050",      .type=PERIPH_IMU,   .bind=imu_mpu6050_bind,   .unbind=imu_mpu6050_unbind, .ops=&imu_mpu6050_ops },
     { .name="gpio",         .type=PERIPH_GPIO,  .bind=gpiochip_line_bind, .unbind=gpiochip_line_unbind, .ops=&gpiochip_line_ops },
     { .name="motor_hbridge",.type=PERIPH_MOTOR, .bind=motor_hbridge_bind, .unbind=motor_hbridge_unbind, .ops=&motor_hbridge_ops },
 };
 
-static const size_t global_num_drivers = sizeof(global_drivers) / sizeof(global_drivers[0]);
+const size_t global_num_drivers = sizeof(global_drivers) / sizeof(global_drivers[0]);
 
 #ifdef __cplusplus
 } /* extern "C" */
