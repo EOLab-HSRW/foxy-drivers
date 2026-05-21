@@ -419,6 +419,17 @@ def install_signal_handlers() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
+def publish_offline_status() -> None:
+    with state_lock:
+        state.online = 0
+        state.battery = None
+        state.last_error = "daemon_stopped"
+
+    try:
+        write_status_file_atomic()
+    except Exception:
+        logging.exception("failed to publish final offline status")
+
 
 def main() -> int:
     setup_logging()
@@ -440,6 +451,7 @@ def main() -> int:
     finally:
         stop_event.set()
         worker.join(timeout=2.0)
+        publish_offline_status()
         logging.info("batteryd stopped")
 
     return 0
