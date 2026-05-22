@@ -36,8 +36,10 @@ import io
 import logging
 import os
 import queue
+import shlex
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -61,7 +63,12 @@ BATTERYD_SERIAL = os.environ.get("BATTERYD_SERIAL", "")
 
 # Public daemon command SHUTDOWN maps to this raw battery command.
 # The battery.py API already defines BATTERY_CMD_SEP as CRLF.
-BATTERY_SHUTDOWN_COMMAND = os.environ.get("BATTERYD_SHUTDOWN_CMD", "QQ").encode("ascii") + BATTERY_CMD_SEP
+BATTERY_SHUTDOWN_COMMAND = os.environ.get("BATTERYD_SHUTDOWN_CMD", "Q15").encode("ascii") + BATTERY_CMD_SEP
+
+# Command used to shut down Linux after the battery command has been sent.
+SYSTEM_POWEROFF_COMMAND = os.environ.get("BATTERYD_POWEROFF_COMMAND", "systemctl poweroff")
+SYSTEM_POWEROFF_DELAY_SEC = float(os.environ.get("BATTERYD_POWEROFF_DELAY_SEC", "0.2"))
+BATTERY_COMMAND_SEND_TIMEOUT_SEC = float(os.environ.get("BATTERYD_COMMAND_SEND_TIMEOUT_SEC", "5.0"))
 
 MAX_CLIENT_COMMAND_BYTES = 128
 STATUS_REFRESH_SEC = float(os.environ.get("BATTERYD_STATUS_REFRESH_SEC", "1.0"))
@@ -83,10 +90,19 @@ class DaemonState:
     last_error: str = ""
 
 
+@dataclass
+class QueuedBatteryCommand:
+    raw_command: bytes
+    name: str
+    sent_event: Optional[threading.Event] = None
+    error: str = ""
+
+
 state = DaemonState()
 state_lock = threading.Lock()
-command_queue: "queue.Queue[bytes]" = queue.Queue()
+command_queue: "queue.Queue[QueuedBatteryCommand]" = queue.Queue()
 stop_event = threading.Event()
+system_shutdown_started = threading.Event()
 
 
 # -----------------------------------------------------------------------------
@@ -242,15 +258,23 @@ def create_battery() -> RobotBattery:
 def drain_control_commands(battery: RobotBattery) -> None:
     while True:
         try:
-            raw_command = command_queue.get_nowait()
+            request = command_queue.get_nowait()
         except queue.Empty:
             return
 
         # RobotBattery owns the UARTManager object. It continuously reads from
         # the UART in its own background thread, but occasional command writes
         # are safe to serialize through this daemon worker.
-        battery.uart_manager.write(raw_command)
-        logging.info("sent battery command: %r", raw_command)
+        try:
+            battery.uart_manager.write(request.raw_command)
+            logging.info("sent battery command %s: %r", request.name, request.raw_command)
+        except Exception as exc:
+            request.error = exc.__class__.__name__
+            logging.exception("failed to send battery command %s", request.name)
+            raise
+        finally:
+            if request.sent_event is not None:
+                request.sent_event.set()
 
 
 def battery_worker() -> None:
@@ -316,6 +340,44 @@ def battery_worker() -> None:
 # Control socket server
 # -----------------------------------------------------------------------------
 
+def start_system_poweroff() -> None:
+    """
+    Start Linux poweroff once, after the battery shutdown command has been
+    confirmed written to UART.
+
+    This runs in a detached helper thread so the control client can still receive
+    the OK response before systemd begins stopping services.
+    """
+    if system_shutdown_started.is_set():
+        return
+
+    system_shutdown_started.set()
+
+    def worker() -> None:
+        if SYSTEM_POWEROFF_DELAY_SEC > 0:
+            time.sleep(SYSTEM_POWEROFF_DELAY_SEC)
+
+        argv = shlex.split(SYSTEM_POWEROFF_COMMAND)
+        if not argv:
+            logging.error("empty system poweroff command")
+            return
+
+        logging.warning("starting system poweroff: %r", argv)
+
+        try:
+            subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            logging.exception("failed to start system poweroff command")
+
+    threading.Thread(target=worker, name="poweroff", daemon=True).start()
+
+
 def handle_control_command(command: str) -> str:
     command = command.strip().upper()
 
@@ -339,8 +401,23 @@ def handle_control_command(command: str) -> str:
         if not online or battery is None:
             return "ERR battery_offline\n"
 
-        command_queue.put(BATTERY_SHUTDOWN_COMMAND)
-        return "OK\n"
+        sent_event = threading.Event()
+        request = QueuedBatteryCommand(
+            raw_command=BATTERY_SHUTDOWN_COMMAND,
+            name="shutdown",
+            sent_event=sent_event,
+        )
+
+        command_queue.put(request)
+
+        if not sent_event.wait(BATTERY_COMMAND_SEND_TIMEOUT_SEC):
+            return "ERR battery_command_timeout\n"
+
+        if request.error:
+            return f"ERR battery_command_failed_{request.error}\n"
+
+        start_system_poweroff()
+        return "OK shutting_down\n"
 
     return "ERR unknown_command\n"
 
@@ -419,6 +496,7 @@ def install_signal_handlers() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
+
 def publish_offline_status() -> None:
     with state_lock:
         state.online = 0
@@ -459,4 +537,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
