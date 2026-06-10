@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Jetson Nano J41 physical pin 29 = sysfs GPIO 149.
+GPIO="${FOXY_HAT_ENABLE_GPIO:-149}"
+GPIO_PATH="/sys/class/gpio/gpio${GPIO}"
+MODE="${FOXY_HAT_ENABLE:-auto}"
+
+log() {
+    printf 'foxy-hat-enable: %s\n' "$*"
+}
+
+die() {
+    printf 'foxy-hat-enable: ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+read_dt_property() {
+    local path="$1"
+    [ -r "$path" ] || return 1
+    tr '\0' ' ' < "$path" 2>/dev/null || return 1
+}
+
+is_truthy() {
+    case "${1,,}" in
+        1|yes|true|on|force|forced) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_falsey() {
+    case "${1,,}" in
+        0|no|false|off|disable|disabled|none) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_jetson_nano() {
+    local model="" compatible=""
+    model="$(read_dt_property /proc/device-tree/model || true)"
+    compatible="$(read_dt_property /proc/device-tree/compatible || true)"
+
+    case "${model} ${compatible}" in
+        *"Jetson Nano"*|*"jetson-nano"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+should_enable_hat_gpio() {
+    if is_truthy "$MODE"; then
+        return 0
+    fi
+
+    if is_falsey "$MODE"; then
+        log "disabled by FOXY_HAT_ENABLE=$MODE"
+        return 1
+    fi
+
+    if [ "${MODE,,}" != "auto" ]; then
+        die "invalid FOXY_HAT_ENABLE=$MODE; use auto, true, or false"
+    fi
+
+    if is_jetson_nano; then
+        return 0
+    fi
+
+    log "not a Jetson Nano device-tree platform; leaving HAT GPIO unchanged"
+    return 1
+}
+
+[ "${EUID}" -eq 0 ] || die "must run as root"
+[[ "$GPIO" =~ ^[0-9]+$ ]] || die "FOXY_HAT_ENABLE_GPIO must be a numeric sysfs GPIO number"
+
+if ! should_enable_hat_gpio; then
+    exit 0
+fi
+
+[ -e /sys/class/gpio/export ] || die "sysfs GPIO export is not available"
+
+if [ ! -d "$GPIO_PATH" ]; then
+    log "exporting GPIO $GPIO"
+    printf '%s\n' "$GPIO" > /sys/class/gpio/export
+
+    for _ in $(seq 1 40); do
+        [ -d "$GPIO_PATH" ] && break
+        sleep 0.05
+    done
+fi
+
+[ -d "$GPIO_PATH" ] || die "GPIO path did not appear: $GPIO_PATH"
+[ -w "$GPIO_PATH/direction" ] || die "GPIO direction is not writable: $GPIO_PATH/direction"
+[ -w "$GPIO_PATH/value" ] || die "GPIO value is not writable: $GPIO_PATH/value"
+
+printf 'out\n' > "$GPIO_PATH/direction"
+printf '1\n' > "$GPIO_PATH/value"
+
+log "GPIO $GPIO set HIGH"

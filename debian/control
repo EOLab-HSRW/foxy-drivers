@@ -1,0 +1,16 @@
+Source: foxy-drivers
+Section: admin
+Priority: optional
+Maintainer: Harley Lara <contact@harleylara.com>
+Standards-Version: 4.6.2
+Build-Depends: debhelper-compat (= 13)
+Homepage: https://github.com/EOLab-HSRW/foxy-drivers
+
+Package: foxy-drivers
+Architecture: all
+Depends: ${misc:Depends}, bash, python3
+Recommends: build-essential, linux-libc-dev
+Description: Low-level Foxy robot hardware drivers
+ Installs the Foxy single-header C driver, the batteryd daemon/client header,
+ and the systemd units used to enable the Foxy HAT GPIO mapping and publish
+ battery status/control through /run/batteryd.

@@ -1,0 +1,13 @@
+[Unit]
+Description=Enable Foxy HAT GPIO mapping
+After=systemd-udevd.service
+Before=batteryd.service
+
+[Service]
+Type=oneshot
+Environment=FOXY_HAT_ENABLE=auto
+ExecStart=/usr/local/sbin/foxy-hat-enable
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

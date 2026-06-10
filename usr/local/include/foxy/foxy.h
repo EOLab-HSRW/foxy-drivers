@@ -37,6 +37,13 @@
 #define FOXY_API extern
 #endif
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -184,6 +191,13 @@ FOXY_API int     motor_brake(motor_t m);
 #ifdef FOXY_IMPLEMENTATION
 #ifndef FOXY_IMPLEMENTATION_ONCE
 #define FOXY_IMPLEMENTATION_ONCE
+
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -366,6 +380,13 @@ static const char *family_to_string(platform_family_t f) {
         case PLATFORM_JETSON:    return "jetson";
         case PLATFORM_RASPBERRY: return "raspberry";
         default:                 return "unknown";
+    }
+}
+
+static const char *hat_to_string(hat_t h) {
+    switch (h) {
+        case HAT_V3_15: return "v3.15";
+        default:        return "unknown";
     }
 }
 
@@ -993,6 +1014,47 @@ static int robot_def_get(platform_t platform, hat_t hat, const robot_def_t **out
     return EINVAL;
 }
 
+static hat_t hat_from_string(const char *value) {
+    if (!value || !value[0]) return HAT_UNKNOWN;
+
+    if (contains_ci(value, "none") || contains_ci(value, "off") ||
+        contains_ci(value, "disabled") || strcmp(value, "0") == 0) {
+        return HAT_UNKNOWN;
+    }
+
+    if (contains_ci(value, "v3.15") || contains_ci(value, "v3_15") ||
+        contains_ci(value, "3.15") || strcmp(value, "1") == 0) {
+        return HAT_V3_15;
+    }
+
+    return HAT_UNKNOWN;
+}
+
+static hat_t hat_detect_for_platform(platform_t platform) {
+    const char *env = getenv("FOXY_HAT");
+    hat_t env_hat;
+
+    if (env && env[0] && !contains_ci(env, "auto")) {
+        env_hat = hat_from_string(env);
+        if (env_hat != HAT_UNKNOWN || contains_ci(env, "none") ||
+            contains_ci(env, "off") || contains_ci(env, "disabled") ||
+            strcmp(env, "0") == 0) {
+            return env_hat;
+        }
+    }
+
+    /*
+     * Foxy HAT v3.15 does not expose a reliable EEPROM probe path on the
+     * deployed Jetson Nano systems, so runtime selection is platform-gated
+     * with an explicit FOXY_HAT override for bring-up and diagnostics.
+     */
+    if (platform.family == PLATFORM_JETSON && platform.model == JETSON_MODEL_NANO) {
+        return HAT_V3_15;
+    }
+
+    return HAT_UNKNOWN;
+}
+
 FOXY_API void robot_def_dump(const robot_def_t *def, void *out) {
     FILE *fp = (FILE *)out;
     size_t i;
@@ -1008,6 +1070,7 @@ FOXY_API void robot_def_dump(const robot_def_t *def, void *out) {
     fprintf(fp, "  name: %s\n", def->display_name ? def->display_name : "(null)");
     fprintf(fp, "  key: 0x%08x\n", (unsigned)def->key);
     fprintf(fp, "  platform: %s\n", family_to_string(def->platform_family));
+    fprintf(fp, "  hat: %s\n", hat_to_string(def->hat));
     fprintf(fp, "  peripherals: %zu\n", def->num_peripherals);
 
     for (i = 0; i < def->num_peripherals; i++) {
@@ -1517,9 +1580,8 @@ extern const peripheral_driver_t global_drivers[];
 extern const size_t global_num_drivers;
 
 /**
- * driver lookup: exact-match only, deterministic
- *
- * TODO: how should we tread duplicates ?
+ * Driver lookup: exact-match only, deterministic.
+ * Duplicate driver names are treated as invalid and return NULL.
  */
 static const peripheral_driver_t *driver_find_exact(const char *name,
                                                     const peripheral_driver_t *tbl,
@@ -1732,10 +1794,7 @@ FOXY_API robot_t robot_init(void) {
 
     (void)human; /* optional informational string */
 
-    /* TODO: detect HAT at runtime */
-    // Harley 15 feb: IDK why the built-in EEPROM
-    // does not show up in the I2C bus.
-    hat = HAT_V3_15;
+    hat = hat_detect_for_platform(platform);
 
     if (robot_def_get(platform, hat, &def) != 0 || !def) {
         r.error = -ENODEV;

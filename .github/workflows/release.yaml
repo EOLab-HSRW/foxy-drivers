@@ -1,0 +1,24 @@
+name: Release Debian package
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: EOLab-HSRW/drones-workflows/.github/workflows/deb-apt-release.yaml@main
+    with:
+      suites: "jammy"
+      component: "main"
+      arches: "all"
+      # optional overrides (handle automatically by the workflow):
+      # stable_asset_name: "eoalab-drones-sources_latest.deb"
+      # origin: "EOLab-HSRW"
+      # label: "drones-sources"
+      # description: " Helper Debian package to manage eolab-drones' APT source lists."
+    secrets:
+      apt_gpg_private_key: ${{ secrets.DRONES_GPG_PRIVATE_KEY }}
+      apt_gpg_passphrase: ${{ secrets.APT_GPG_PASSPHRASE }}

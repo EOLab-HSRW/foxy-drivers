@@ -1,0 +1,9 @@
+usr/local/include/foxy/foxy.h usr/local/include/foxy
+usr/local/include/foxy/batteryd.h usr/local/include/foxy
+usr/local/include/foxy/battery.h usr/local/include/foxy
+usr/local/sbin/foxy-hat-enable usr/local/sbin
+etc/systemd/system/foxy-hat-enable.service lib/systemd/system
+etc/systemd/system/batteryd.service lib/systemd/system
+opt/batteryd/battery.py opt/batteryd
+opt/batteryd/batteryd.py opt/batteryd
+opt/foxy-drivers-demo/demo.c opt/foxy-drivers-demo
