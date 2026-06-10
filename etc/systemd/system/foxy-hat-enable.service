@@ -6,7 +6,7 @@ Before=batteryd.service
 [Service]
 Type=oneshot
 Environment=FOXY_HAT_ENABLE=auto
-ExecStart=/usr/local/sbin/foxy-hat-enable
+ExecStart=/usr/sbin/foxy-hat-enable
 RemainAfterExit=yes
 
 [Install]
