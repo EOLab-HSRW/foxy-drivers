@@ -21,7 +21,7 @@ int main(void) {
         printf("\n");
     }
 
-    batteryd_shutdown(NULL);        /* sends SHUTDOWN */
+    // batteryd_shutdown(NULL);        /* sends SHUTDOWN */
 
     return 0;
 }

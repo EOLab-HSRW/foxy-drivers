@@ -1,3 +1,7 @@
+"""
+This program is mainly use to test battery.py
+to verify the hardware interface to the battery.
+"""
 import time
 from typing import Any
 from battery import RobotBattery

@@ -6,8 +6,7 @@ int main(void) {
     robot_t robot = robot_init();
 
     if (!robot_ok(&robot)) {
-        // TODO: add message
-        // fail to init robot
+        printf("Fail to init robot description\n");
         return 1;
     }
 
@@ -15,8 +14,7 @@ int main(void) {
 
     led_t leds = led_init_name(&robot, "leds_front_and_rear");
     if (!leds.ctx) {
-        // TODO: add message
-        // fail to init led driver
+        printf("Fail to init led driver\n");
         robot_deinit(&robot);
         return 1;
     }
@@ -34,6 +32,7 @@ int main(void) {
     imu_t imu = imu_init_name(&robot, "imu0");
 
     if (!imu.ctx) {
+        printf("Fail to init imu driver\n");
         robot_deinit(&robot);
         return 1;
     }
@@ -52,6 +51,11 @@ int main(void) {
     }
 
     gpio_t button = gpio_init_name(&robot, "top_button");
+
+    if (!button.ctx) {
+        printf("Fail to init button driver\n");
+        return 1;
+    }
     gpio_set_as_input(button);
     for (size_t i = 0; i < 10; i++) {
         int v = gpio_read(button);

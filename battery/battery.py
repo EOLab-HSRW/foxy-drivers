@@ -1,3 +1,12 @@
+"""
+This is the python hardware interface for Foxy robot.
+
+It is mainly use to be consume by the batteryd (battery deamon)
+after that you are suppose to use the battery using the 
+plain ASCII text interface under /run/batteryd/status
+or the socket use for control under /run/batteryd/control.sock
+"""
+
 from __future__ import annotations
 
 import os
