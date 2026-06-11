@@ -37,13 +37,6 @@
 #define FOXY_API extern
 #endif
 
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L
-#endif
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -191,13 +184,6 @@ FOXY_API int     motor_brake(motor_t m);
 #ifdef FOXY_IMPLEMENTATION
 #ifndef FOXY_IMPLEMENTATION_ONCE
 #define FOXY_IMPLEMENTATION_ONCE
-
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L
-#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -380,13 +366,6 @@ static const char *family_to_string(platform_family_t f) {
         case PLATFORM_JETSON:    return "jetson";
         case PLATFORM_RASPBERRY: return "raspberry";
         default:                 return "unknown";
-    }
-}
-
-static const char *hat_to_string(hat_t h) {
-    switch (h) {
-        case HAT_V3_15: return "v3.15";
-        default:        return "unknown";
     }
 }
 
@@ -651,6 +630,41 @@ typedef struct {
     endpoint_u_t u;
 } peripheral_primary_t;
 
+#ifdef __cplusplus
+
+#define PRI_I2C(_adapter, _addr) \
+    peripheral_primary_t{ .iface=IFACE_I2C, .u={.i2c = {.adapter=(_adapter), .addr=(_addr) } } }
+
+#define PRI_GPIO(_chip, _offset, _active_low) \
+    peripheral_primary_t{ .iface=IFACE_GPIO, .u={.gpio = {.line={.chip = (_chip), .offset = (_offset), .active_low = (_active_low) } } } }
+
+#define PRI_SPI(_dev, _hz, _mode) \
+    peripheral_primary_t{ \
+        .iface = IFACE_SPI, \
+        .u = { .spi = { .dev = (_dev), .hz = (_hz), .mode = (_mode) } } \
+    }
+
+#define PRI_UART(_dev, _baud) \
+    peripheral_primary_t{ \
+        .iface = IFACE_UART, \
+        .u = { .uart = { .dev = (_dev), .baud = (_baud) } } \
+    }
+
+#define PRI_V4L2(_dev) \
+    peripheral_primary_t{ \
+        .iface = IFACE_V4L2, \
+        .u = { .v4l2 = { .dev = (_dev) } } \
+    }
+
+#define PRI_CSI(_port, _lanes) \
+    peripheral_primary_t{ \
+        .iface = IFACE_CSI, \
+        .u = { .csi = { .port = (_port), .lanes = (_lanes) } } \
+    }
+
+
+#else
+
 #define PRI_I2C(_adapter, _addr) \
     (peripheral_primary_t){ .iface=IFACE_I2C, .u.i2c={ .adapter=(_adapter), .addr=(_addr) } }
 
@@ -668,6 +682,9 @@ typedef struct {
 
 #define PRI_CSI(_port, _lanes) \
     (peripheral_primary_t){ .iface=IFACE_CSI, .u.csi={ .port=(_port), .lanes=(_lanes) } }
+
+#endif
+
 
 #define PERIPH_MAX_AUX 3
 
@@ -888,9 +905,9 @@ static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
         .num_aux = 2,
         .aux = {
             { .role=ENDPOINT_ROLE_AUX0, .iface=IFACE_GPIO,
-              .u.gpio={ .line={ .chip="/dev/gpiochip0", .offset=38, .active_low=false } } }, // physical pin 33
+              .u={.gpio = { .line = { .chip="/dev/gpiochip0", .offset=38, .active_low=false } } } }, // physical pin 33
             { .role=ENDPOINT_ROLE_AUX1, .iface=IFACE_GPIO,
-              .u.gpio={ .line={ .chip="/dev/gpiochip0", .offset=200, .active_low=false } } }, // physical pin 31
+              .u = { .gpio = { .line = { .chip="/dev/gpiochip0", .offset=200, .active_low=false } } } }, // physical pin 31
         },
         .props = motor2_props,
         .num_props = (uint16_t)(sizeof(motor2_props)/sizeof(motor2_props[0])),
@@ -1014,47 +1031,6 @@ static int robot_def_get(platform_t platform, hat_t hat, const robot_def_t **out
     return EINVAL;
 }
 
-static hat_t hat_from_string(const char *value) {
-    if (!value || !value[0]) return HAT_UNKNOWN;
-
-    if (contains_ci(value, "none") || contains_ci(value, "off") ||
-        contains_ci(value, "disabled") || strcmp(value, "0") == 0) {
-        return HAT_UNKNOWN;
-    }
-
-    if (contains_ci(value, "v3.15") || contains_ci(value, "v3_15") ||
-        contains_ci(value, "3.15") || strcmp(value, "1") == 0) {
-        return HAT_V3_15;
-    }
-
-    return HAT_UNKNOWN;
-}
-
-static hat_t hat_detect_for_platform(platform_t platform) {
-    const char *env = getenv("FOXY_HAT");
-    hat_t env_hat;
-
-    if (env && env[0] && !contains_ci(env, "auto")) {
-        env_hat = hat_from_string(env);
-        if (env_hat != HAT_UNKNOWN || contains_ci(env, "none") ||
-            contains_ci(env, "off") || contains_ci(env, "disabled") ||
-            strcmp(env, "0") == 0) {
-            return env_hat;
-        }
-    }
-
-    /*
-     * Foxy HAT v3.15 does not expose a reliable EEPROM probe path on the
-     * deployed Jetson Nano systems, so runtime selection is platform-gated
-     * with an explicit FOXY_HAT override for bring-up and diagnostics.
-     */
-    if (platform.family == PLATFORM_JETSON && platform.model == JETSON_MODEL_NANO) {
-        return HAT_V3_15;
-    }
-
-    return HAT_UNKNOWN;
-}
-
 FOXY_API void robot_def_dump(const robot_def_t *def, void *out) {
     FILE *fp = (FILE *)out;
     size_t i;
@@ -1070,7 +1046,6 @@ FOXY_API void robot_def_dump(const robot_def_t *def, void *out) {
     fprintf(fp, "  name: %s\n", def->display_name ? def->display_name : "(null)");
     fprintf(fp, "  key: 0x%08x\n", (unsigned)def->key);
     fprintf(fp, "  platform: %s\n", family_to_string(def->platform_family));
-    fprintf(fp, "  hat: %s\n", hat_to_string(def->hat));
     fprintf(fp, "  peripherals: %zu\n", def->num_peripherals);
 
     for (i = 0; i < def->num_peripherals; i++) {
@@ -1580,8 +1555,9 @@ extern const peripheral_driver_t global_drivers[];
 extern const size_t global_num_drivers;
 
 /**
- * Driver lookup: exact-match only, deterministic.
- * Duplicate driver names are treated as invalid and return NULL.
+ * driver lookup: exact-match only, deterministic
+ *
+ * TODO: how should we tread duplicates ?
  */
 static const peripheral_driver_t *driver_find_exact(const char *name,
                                                     const peripheral_driver_t *tbl,
@@ -1794,7 +1770,10 @@ FOXY_API robot_t robot_init(void) {
 
     (void)human; /* optional informational string */
 
-    hat = hat_detect_for_platform(platform);
+    /* TODO: detect HAT at runtime */
+    // Harley 15 feb: IDK why the built-in EEPROM
+    // does not show up in the I2C bus.
+    hat = HAT_V3_15;
 
     if (robot_def_get(platform, hat, &def) != 0 || !def) {
         r.error = -ENODEV;
