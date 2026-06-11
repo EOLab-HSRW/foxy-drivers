@@ -1,3 +1,10 @@
+foxy-drivers (1.0.1-0) jammy; urgency=medium
+
+  * Fix: Change file to allow to build in c and cpp environments, this is
+    important for ros2 compilation.
+
+ -- Harley Lara <contact@harleylara.com>  Thu, 11 Jun 2026 15:33:00 +0000
+
 foxy-drivers (1.0.0-2) jammy; urgency=medium
 
   * Add exec permission to foxy-hat-enable.
