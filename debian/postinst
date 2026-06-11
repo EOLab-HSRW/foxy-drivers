@@ -1,0 +1,35 @@
+#!/bin/sh
+set -e
+
+# Create dedicated system group.
+if ! getent group batteryd >/dev/null; then
+    addgroup --system batteryd
+fi
+
+# Create dedicated system user.
+if ! getent passwd batteryd >/dev/null; then
+    adduser \
+        --system \
+        --ingroup batteryd \
+        --home /nonexistent \
+        --no-create-home \
+        --shell /usr/sbin/nologin \
+        --gecos "Foxy battery daemon" \
+        batteryd
+fi
+
+# On Foxy robot images, the default ROS/user account is "foxy".
+# Add it to the batteryd group when it exists.
+if getent passwd foxy >/dev/null; then
+    adduser foxy batteryd
+fi
+
+# Reload udev rules if udevadm is available.
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules || true
+    udevadm trigger --subsystem-match=tty || true
+fi
+
+#DEBHELPER#
+
+exit 0

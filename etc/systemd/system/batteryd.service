@@ -2,9 +2,15 @@
 Description=Foxy battery daemon
 Documentation=file:/opt/batteryd/batteryd.py
 After=foxy-hat-enable.service
+Requires=foxy-hat-enable.service
 
 [Service]
 Type=simple
+
+User=batteryd
+Group=batteryd
+UMask=0117
+
 ExecStart=/usr/bin/python3 /opt/batteryd/batteryd.py
 Restart=always
 RestartSec=2

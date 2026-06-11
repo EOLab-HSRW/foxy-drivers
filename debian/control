@@ -8,7 +8,7 @@ Homepage: https://github.com/EOLab-HSRW/foxy-drivers
 
 Package: foxy-drivers
 Architecture: all
-Depends: ${misc:Depends}, bash, python3
+Depends: ${misc:Depends}, bash, python3, adduser, udev
 Recommends: build-essential, linux-libc-dev
 Description: Low-level Foxy robot hardware drivers
  Installs the Foxy single-header C driver, the batteryd daemon/client header,
