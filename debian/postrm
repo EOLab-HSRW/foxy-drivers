@@ -1,0 +1,55 @@
+#!/bin/sh
+set -e
+
+STATE_DIR=/var/lib/foxy-drivers
+
+case "$1" in
+    remove)
+        # Package files are removed by dpkg.
+        # Keep system user/group on normal remove.
+        # Just reload udev so removed rules stop applying to future devices.
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules || true
+            udevadm trigger --subsystem-match=tty || true
+            udevadm trigger --subsystem-match=i2c-dev || true
+            udevadm trigger --subsystem-match=gpio || true
+        fi
+        ;;
+
+    purge)
+        # Undo default "foxy" group membership only if this package added it.
+        if [ -f "$STATE_DIR/added-foxy-to-foxyhw" ] && getent passwd foxy >/dev/null && getent group foxyhw >/dev/null; then
+            deluser foxy foxyhw || true
+        fi
+
+        # Remove package-created system user.
+        # Do this before removing the group, because foxyhw is the user's primary group.
+        if [ -f "$STATE_DIR/created-user-foxyhw" ] && getent passwd foxyhw >/dev/null; then
+            deluser --system foxyhw || true
+        fi
+
+        # Remove package-created system group.
+        # This may fail if an admin added other users to it; do not abort purge.
+        if [ -f "$STATE_DIR/created-group-foxyhw" ] && getent group foxyhw >/dev/null; then
+            delgroup --system foxyhw || true
+        fi
+
+        rm -rf "$STATE_DIR"
+
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules || true
+            udevadm trigger --subsystem-match=tty || true
+            udevadm trigger --subsystem-match=i2c-dev || true
+            udevadm trigger --subsystem-match=gpio || true
+        fi
+        ;;
+
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+
+    *)
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

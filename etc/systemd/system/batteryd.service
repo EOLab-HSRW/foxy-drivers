@@ -7,8 +7,8 @@ Requires=foxy-hat-enable.service
 [Service]
 Type=simple
 
-User=batteryd
-Group=batteryd
+User=foxyhw
+Group=foxyhw
 UMask=0117
 
 ExecStart=/usr/bin/python3 /opt/batteryd/batteryd.py

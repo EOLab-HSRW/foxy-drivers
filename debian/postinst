@@ -1,35 +1,45 @@
 #!/bin/sh
 set -e
 
-# Create dedicated system group.
-if ! getent group batteryd >/dev/null; then
-    addgroup --system batteryd
+STATE_DIR=/var/lib/foxy-drivers
+
+mkdir -p "$STATE_DIR"
+
+# Create unified Foxy hardware-access group.
+if ! getent group foxyhw >/dev/null; then
+    addgroup --system foxyhw
+    touch "$STATE_DIR/created-group-foxyhw"
 fi
 
-# Create dedicated system user.
-if ! getent passwd batteryd >/dev/null; then
+# Create unified Foxy hardware-access user.
+if ! getent passwd foxyhw >/dev/null; then
     adduser \
         --system \
-        --ingroup batteryd \
+        --ingroup foxyhw \
         --home /nonexistent \
         --no-create-home \
         --shell /usr/sbin/nologin \
-        --gecos "Foxy battery daemon" \
-        batteryd
+        --gecos "Foxy hardware access" \
+        foxyhw
+    touch "$STATE_DIR/created-user-foxyhw"
 fi
 
 # On Foxy robot images, the default ROS/user account is "foxy".
-# Add it to the batteryd group when it exists.
+# Add it to the unified hardware-access group when it exists.
 if getent passwd foxy >/dev/null; then
-    adduser foxy batteryd
+    if ! id -nG foxy | tr ' ' '\n' | grep -qx foxyhw; then
+        adduser foxy foxyhw
+        touch "$STATE_DIR/added-foxy-to-foxyhw"
+    fi
 fi
 
 # Reload udev rules if udevadm is available.
 if command -v udevadm >/dev/null 2>&1; then
     udevadm control --reload-rules || true
     udevadm trigger --subsystem-match=tty || true
+    udevadm trigger --subsystem-match=i2c-dev || true
+    udevadm trigger --subsystem-match=gpio || true
 fi
 
 #DEBHELPER#
-
 exit 0

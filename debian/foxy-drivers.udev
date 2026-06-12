@@ -1,1 +1,6 @@
-SUBSYSTEM=="tty", ATTRS{idVendor}=="04d8", ATTRS{idProduct}=="ecb7", GROUP="batteryd", MODE="0660"
+# Foxy battery controller USB serial device.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="04d8", ATTRS{idProduct}=="ecb7", GROUP="foxyhw", MODE="0660"
+
+# Foxy low-level header driver hardware access.
+SUBSYSTEM=="i2c-dev", KERNEL=="i2c-1", GROUP="foxyhw", MODE="0660"
+SUBSYSTEM=="gpio", KERNEL=="gpiochip0", GROUP="foxyhw", MODE="0660"
