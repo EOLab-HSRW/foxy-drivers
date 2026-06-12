@@ -3,6 +3,8 @@ usr/include/foxy/batteryd.h usr/include/foxy
 usr/sbin/foxy-hat-enable usr/sbin
 etc/systemd/system/foxy-hat-enable.service lib/systemd/system
 etc/systemd/system/batteryd.service lib/systemd/system
+etc/systemd/system/foxy-poweroff.service lib/systemd/system
+etc/sudoers.d/foxy-drivers-poweroff etc/sudoers.d
 opt/batteryd/battery.py opt/batteryd
 opt/batteryd/batteryd.py opt/batteryd
 opt/foxy-drivers-demo/demo.c opt/foxy-drivers-demo

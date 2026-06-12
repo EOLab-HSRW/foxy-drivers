@@ -1,3 +1,9 @@
+foxy-drivers (1.0.4-0) jammy; urgency=medium
+
+  * Feature: Add service to shutdown.
+
+ -- Harley Lara <contact@harleylara.com>  Fri, 12 Jun 2026 15:33:00 +0000
+
 foxy-drivers (1.0.3-0) jammy; urgency=medium
 
   * Feature: Refactor user and group to add a unified "foxyhw" user and group

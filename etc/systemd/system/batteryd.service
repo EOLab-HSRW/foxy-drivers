@@ -10,13 +10,14 @@ Type=simple
 User=foxyhw
 Group=foxyhw
 UMask=0117
+SupplementaryGroups=foxypower
 
 ExecStart=/usr/bin/python3 /opt/batteryd/batteryd.py
 Restart=always
 RestartSec=2
 RuntimeDirectory=batteryd
 RuntimeDirectoryMode=0755
-Environment=PYTHONUNBUFFERED=1
+Environment="BATTERYD_POWEROFF_COMMAND=/usr/bin/sudo -n /usr/bin/systemctl start foxy-poweroff.service"
 
 [Install]
 WantedBy=multi-user.target

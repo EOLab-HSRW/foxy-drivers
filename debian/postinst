@@ -11,6 +11,13 @@ if ! getent group foxyhw >/dev/null; then
     touch "$STATE_DIR/created-group-foxyhw"
 fi
 
+# Create unified Foxy power-control group.
+if ! getent group foxypower >/dev/null; then
+    addgroup --system foxypower
+    touch "$STATE_DIR/created-group-foxypower"
+fi
+
+
 # Create unified Foxy hardware-access user.
 if ! getent passwd foxyhw >/dev/null; then
     adduser \
@@ -31,6 +38,12 @@ if getent passwd foxy >/dev/null; then
         adduser foxy foxyhw
         touch "$STATE_DIR/added-foxy-to-foxyhw"
     fi
+fi
+
+# Allow the battery daemon user to request robot poweroff.
+if ! id -nG foxyhw | tr ' ' '\n' | grep -qx foxypower; then
+    adduser foxyhw foxypower
+    touch "$STATE_DIR/added-foxyhw-to-foxypower"
 fi
 
 # Reload udev rules if udevadm is available.

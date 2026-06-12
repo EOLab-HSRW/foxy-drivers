@@ -1,0 +1,2 @@
+SupplementaryGroups=foxypower
+Environment="BATTERYD_POWEROFF_COMMAND=/usr/bin/sudo -n /usr/bin/systemctl start foxy-poweroff.service"
