@@ -1,21 +1,18 @@
 [Unit]
-Description=Foxy battery daemon
-Documentation=file:/opt/batteryd/batteryd.py
+Description=Foxy battery monitor
+Documentation=file:/opt/foxy-drivers/battery_monitor.py
 After=foxy-hat-enable.service
 Requires=foxy-hat-enable.service
 
 [Service]
 Type=simple
-
 User=foxyhw
 Group=foxyhw
-UMask=0117
 SupplementaryGroups=foxypower
-
-ExecStart=/usr/bin/python3 /opt/batteryd/batteryd.py
+ExecStart=/usr/bin/python3 /opt/foxy-drivers/battery_monitor.py
 Restart=always
 RestartSec=2
-RuntimeDirectory=batteryd
+RuntimeDirectory=foxy-battery-monitor
 RuntimeDirectoryMode=0755
 Environment="BATTERYD_POWEROFF_COMMAND=/usr/bin/sudo -n /usr/bin/systemctl start foxy-poweroff.service"
 

@@ -1,7 +1,7 @@
 [Unit]
 Description=Enable Foxy HAT GPIO mapping
 After=systemd-udevd.service
-Before=batteryd.service
+Before=foxy-battery-monitor.service
 
 [Service]
 Type=oneshot

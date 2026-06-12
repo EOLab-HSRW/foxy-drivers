@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-batteryd.py
+battery_monitor.py
 
-Linux daemon wrapper around the sibling battery.py RobotBattery API.
+Linux service (systemd) wrapper around the sibling battery.py RobotBattery API.
 
 Expected layout (install):
 
-  /opt/batteryd/
+  /opt/foxy-drivers/
     battery.py
-    batteryd.py
+    battery_monitor.py (this file)
 
 Design:
   - battery.py owns USB serial discovery, termios, UART framing, packet parsing,
     and cached battery status.
-  - batteryd.py owns daemon lifecycle, journald-friendly logging, status-file
+  - battery_monitor.py owns service lifecycle, journald-friendly logging, status-file
     publication, and the local Unix-socket command API.
-  - C/C++ clients can either read /run/batteryd/status or use the ASCII control
-    socket at /run/batteryd/control.sock.
+  - C/C++ clients can either read /run/foxy-battery-monitor/status or use the ASCII control
+    socket at /run/foxy-battery-monitor/control.sock.
 
 Control socket commands:
   PING
@@ -53,31 +53,42 @@ from battery import BATTERY_CMD_SEP, RobotBattery
 # Configuration
 # -----------------------------------------------------------------------------
 
-RUNTIME_DIR = os.environ.get("BATTERYD_RUNTIME_DIR", "/run/batteryd")
+SERVICE_NAME = "foxy-battery-monitor"
+
+def getenv_compat(name: str, default: str) -> str:
+    new_name = f"FOXY_BATTERY_MONITOR_{name}"
+    return os.environ.get(new_name, default)
+
+RUNTIME_DIR = getenv_compat("RUNTIME_DIR", "/run/foxy-battery-monitor")
 STATUS_PATH = os.path.join(RUNTIME_DIR, "status")
 CONTROL_SOCKET_PATH = os.path.join(RUNTIME_DIR, "control.sock")
 
 # Optional explicit serial path. If unset, battery.py's RobotBattery scans for
 # the configured battery VID/PID by itself.
-BATTERYD_SERIAL = os.environ.get("BATTERYD_SERIAL", "")
+FOXY_BATTERY_MONITOR_SERIAL = getenv_compat("SERIAL", "")
 
 # Public daemon command SHUTDOWN maps to this raw battery command.
 # The battery.py API already defines BATTERY_CMD_SEP as CRLF.
-BATTERY_SHUTDOWN_COMMAND = os.environ.get("BATTERYD_SHUTDOWN_CMD", "Q15").encode("ascii") + BATTERY_CMD_SEP
+BATTERY_SHUTDOWN_COMMAND = (
+    getenv_compat("SHUTDOWN_CMD", "Q15").encode("ascii") + BATTERY_CMD_SEP
+)
 
 # Command used to shut down Linux after the battery command has been sent.
-SYSTEM_POWEROFF_COMMAND = os.environ.get("BATTERYD_POWEROFF_COMMAND", "systemctl poweroff")
-SYSTEM_POWEROFF_DELAY_SEC = float(os.environ.get("BATTERYD_POWEROFF_DELAY_SEC", "0.2"))
-BATTERY_COMMAND_SEND_TIMEOUT_SEC = float(os.environ.get("BATTERYD_COMMAND_SEND_TIMEOUT_SEC", "5.0"))
+SYSTEM_POWEROFF_COMMAND = SYSTEM_POWEROFF_COMMAND = getenv_compat(
+    "POWEROFF_COMMAND",
+    "systemctl poweroff",
+)
+SYSTEM_POWEROFF_DELAY_SEC = float(getenv_compat("POWEROFF_DELAY_SEC", "0.2"))
+BATTERY_COMMAND_SEND_TIMEOUT_SEC = float(getenv_compat("COMMAND_SEND_TIMEOUT_SEC", "5.0"))
+STATUS_REFRESH_SEC = float(getenv_compat("STATUS_REFRESH_SEC", "1.0"))
+STALE_AFTER_SEC = float(getenv_compat("STALE_AFTER_SEC", "3.0"))
+RECONNECT_DELAY_SEC = float(getenv_compat("RECONNECT_DELAY_SEC", "2.0"))
+
 
 MAX_CLIENT_COMMAND_BYTES = 128
-STATUS_REFRESH_SEC = float(os.environ.get("BATTERYD_STATUS_REFRESH_SEC", "1.0"))
-STALE_AFTER_SEC = float(os.environ.get("BATTERYD_STALE_AFTER_SEC", "3.0"))
-RECONNECT_DELAY_SEC = float(os.environ.get("BATTERYD_RECONNECT_DELAY_SEC", "2.0"))
 
 PROTOCOL_VERSION = 1
-DAEMON_VERSION = "0.2.0"
-
+MONITOR_VERSION = "1.0.0"
 
 # -----------------------------------------------------------------------------
 # Runtime state
@@ -137,13 +148,13 @@ class SystemdJournalFormatter(logging.Formatter):
 
 
 def setup_logging() -> None:
-    level_name = os.environ.get("BATTERYD_LOG_LEVEL", "INFO").upper()
+    level_name = getenv_compat("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
 
     handler = logging.StreamHandler(stream=sys.stderr)
     handler.setLevel(level)
     handler.setFormatter(SystemdJournalFormatter(
-        fmt="batteryd[%(process)d]: %(levelname)s %(threadName)s: %(message)s"
+        fmt="foxy-battery-monitor[%(process)d]: %(levelname)s %(threadName)s: %(message)s"
     ))
 
     root = logging.getLogger()
@@ -249,8 +260,8 @@ def write_status_file_atomic() -> None:
 # -----------------------------------------------------------------------------
 
 def create_battery() -> RobotBattery:
-    if BATTERYD_SERIAL:
-        return RobotBattery(device_path=BATTERYD_SERIAL, wait_for_first_status=True)
+    if FOXY_BATTERY_MONITOR_SERIAL:
+        return RobotBattery(device_path=FOXY_BATTERY_MONITOR_SERIAL, wait_for_first_status=True)
 
     return RobotBattery(wait_for_first_status=True)
 
@@ -388,7 +399,7 @@ def handle_control_command(command: str) -> str:
         return "OK\n"
 
     if command == "VERSION":
-        return f"OK batteryd={DAEMON_VERSION} protocol={PROTOCOL_VERSION}\n"
+        return f"OK foxy-battery-monitor={MONITOR_VERSION} protocol={PROTOCOL_VERSION}\n"
 
     if command == "GET":
         return "OK " + snapshot_status_line() + "\n"
@@ -513,8 +524,8 @@ def main() -> int:
     setup_logging()
     install_signal_handlers()
 
-    logging.info("starting batteryd")
-    logging.info("runtime_dir=%s serial=%s", RUNTIME_DIR, BATTERYD_SERIAL or "auto")
+    logging.info("starting foxy-battery-monitor")
+    logging.info("runtime_dir=%s serial=%s", RUNTIME_DIR, FOXY_BATTERY_MONITOR_SERIAL or "auto")
 
     try:
         write_status_file_atomic()
@@ -530,7 +541,7 @@ def main() -> int:
         stop_event.set()
         worker.join(timeout=2.0)
         publish_offline_status()
-        logging.info("batteryd stopped")
+        logging.info("foxy-battery-monitor stopped")
 
     return 0
 

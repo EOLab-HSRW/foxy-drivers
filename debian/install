@@ -1,10 +1,10 @@
 usr/include/foxy/foxy.h usr/include/foxy
-usr/include/foxy/batteryd.h usr/include/foxy
+usr/include/foxy/battery.h usr/include/foxy
 usr/sbin/foxy-hat-enable usr/sbin
 etc/systemd/system/foxy-hat-enable.service lib/systemd/system
-etc/systemd/system/batteryd.service lib/systemd/system
+etc/systemd/system/foxy-battery-monitor.service lib/systemd/system
 etc/systemd/system/foxy-poweroff.service lib/systemd/system
 etc/sudoers.d/foxy-drivers-poweroff etc/sudoers.d
-opt/batteryd/battery.py opt/batteryd
-opt/batteryd/batteryd.py opt/batteryd
+opt/foxy-drivers/battery.py opt/foxy-drivers
+opt/foxy-drivers/battery_monitor.py opt/foxy-drivers
 opt/foxy-drivers-demo/demo.c opt/foxy-drivers-demo

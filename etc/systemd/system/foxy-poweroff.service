@@ -1,6 +1,6 @@
 [Unit]
 Description=Foxy immediate robot poweroff
-Documentation=file:/opt/batteryd/batteryd.py
+Documentation=file:/opt/foxy-drivers/battery_monitor.py
 DefaultDependencies=no
 Conflicts=shutdown.target
 Before=shutdown.target
