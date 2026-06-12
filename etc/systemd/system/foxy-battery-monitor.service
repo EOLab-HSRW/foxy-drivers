@@ -14,7 +14,7 @@ Restart=always
 RestartSec=2
 RuntimeDirectory=foxy-battery-monitor
 RuntimeDirectoryMode=0755
-Environment="FOXY_BATTERY_POWEROFF_COMMAND=/usr/bin/sudo -n /usr/bin/systemctl start foxy-poweroff.service"
+Environment="FOXY_BATTERY_MONITOR_POWEROFF_COMMAND=/usr/bin/sudo -n /usr/bin/systemctl start foxy-poweroff.service"
 
 [Install]
 WantedBy=multi-user.target
