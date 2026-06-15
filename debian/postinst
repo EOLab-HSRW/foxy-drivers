@@ -2,8 +2,29 @@
 set -e
 
 STATE_DIR=/var/lib/foxy-drivers
-
 mkdir -p "$STATE_DIR"
+
+add_user_to_group_once() {
+    user="$1"
+    group="$2"
+    marker="$3"
+
+    if getent passwd "$user" >/dev/null && getent group "$group" >/dev/null; then
+        if ! id -nG "$user" | tr ' ' '\n' | grep -qx "$group"; then
+            adduser "$user" "$group"
+            touch "$STATE_DIR/$marker"
+        fi
+    fi
+}
+
+reload_udev() {
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules || true
+        udevadm trigger --subsystem-match=tty || true
+        udevadm trigger --subsystem-match=i2c-dev || true
+        udevadm trigger --subsystem-match=gpio || true
+    fi
+}
 
 # Create unified Foxy hardware-access group.
 if ! getent group foxyhw >/dev/null; then
@@ -17,7 +38,6 @@ if ! getent group foxypower >/dev/null; then
     touch "$STATE_DIR/created-group-foxypower"
 fi
 
-
 # Create unified Foxy hardware-access user.
 if ! getent passwd foxyhw >/dev/null; then
     adduser \
@@ -28,31 +48,25 @@ if ! getent passwd foxyhw >/dev/null; then
         --shell /usr/sbin/nologin \
         --gecos "Foxy hardware access" \
         foxyhw
+
     touch "$STATE_DIR/created-user-foxyhw"
 fi
 
 # On Foxy robot images, the default ROS/user account is "foxy".
-# Add it to the unified hardware-access group when it exists.
-if getent passwd foxy >/dev/null; then
-    if ! id -nG foxy | tr ' ' '\n' | grep -qx foxyhw; then
-        adduser foxy foxyhw
-        touch "$STATE_DIR/added-foxy-to-foxyhw"
-    fi
-fi
+# Primary package model: foxy -> foxyhw.
+add_user_to_group_once foxy foxyhw added-foxy-to-foxyhw
 
-# Allow the battery daemon user to request robot poweroff.
-if ! id -nG foxyhw | tr ' ' '\n' | grep -qx foxypower; then
-    adduser foxyhw foxypower
-    touch "$STATE_DIR/added-foxyhw-to-foxypower"
-fi
+# Platform fallback model.
+# Some base images keep /dev/gpiochip0 and /dev/i2c-1 owned by gpio/i2c.
+# Add foxy to those groups only when they already exist.
+add_user_to_group_once foxy gpio added-foxy-to-gpio
+add_user_to_group_once foxy i2c added-foxy-to-i2c
 
-# Reload udev rules if udevadm is available.
-if command -v udevadm >/dev/null 2>&1; then
-    udevadm control --reload-rules || true
-    udevadm trigger --subsystem-match=tty || true
-    udevadm trigger --subsystem-match=i2c-dev || true
-    udevadm trigger --subsystem-match=gpio || true
-fi
+# Allow the battery daemon user to request controlled robot poweroff.
+add_user_to_group_once foxyhw foxypower added-foxyhw-to-foxypower
+
+reload_udev
 
 #DEBHELPER#
+
 exit 0
