@@ -1,3 +1,9 @@
+foxy-drivers (1.0.4-1) jammy; urgency=medium
+
+  * Fix: fix udev permission.
+
+ -- Harley Lara <contact@harleylara.com>  Mon, 15 Jun 2026 12:31:00 +0000
+
 foxy-drivers (1.0.4-0) jammy; urgency=medium
 
   * Feature: Add service to shutdown.
