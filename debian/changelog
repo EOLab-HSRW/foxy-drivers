@@ -1,3 +1,11 @@
+foxy-drivers (1.0.4-2) jammy; urgency=medium
+
+  * Fix problem with:
+  * N: Skipping acquire of configured file 'main/binary-amd64/Packages' as repository 'https://eolab-hsrw.github.io/foxy-drivers jammy InRelease' doesn't support architecture 'amd64'
+  * N: Skipping acquire of configured file 'main/binary-arm64/Packages' as repository 'https://eolab-hsrw.github.io/foxy-drivers jammy InRelease' doesn't support architecture 'arm64'
+
+ -- Harley Lara <contact@harleylara.com>  Sun, 28 Jun 2026 07:02:00 +0000
+
 foxy-drivers (1.0.4-1) jammy; urgency=medium
 
   * Fix: fix udev permission.

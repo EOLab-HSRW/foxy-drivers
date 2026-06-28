@@ -13,7 +13,7 @@ jobs:
     with:
       suites: "jammy"
       component: "main"
-      arches: "all"
+      arches: "amd64 arm64"
       # optional overrides (handle automatically by the workflow):
       # stable_asset_name: "eoalab-drones-sources_latest.deb"
       # origin: "EOLab-HSRW"
