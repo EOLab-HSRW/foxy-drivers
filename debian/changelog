@@ -1,3 +1,9 @@
+foxy-drivers (1.0.5-0) jammy; urgency=medium
+
+  * Fix problem with: led brightness logic
+
+ -- Harley Lara <contact@harleylara.com>  San, 18 Jul 2026 01:19:00 +0000
+
 foxy-drivers (1.0.4-2) jammy; urgency=medium
 
   * Fix problem with:
