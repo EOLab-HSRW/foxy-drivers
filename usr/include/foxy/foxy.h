@@ -739,16 +739,6 @@ static int peripheral_prop_get_u32(const peripheral_desc_t *d, const char *key, 
     return 0;
 }
 
-static int peripheral_prop_get_double(const peripheral_desc_t *d, const char *key, double *out) {
-    const char *v = peripheral_prop_get(d, key);
-    char *end = NULL;
-    double x;
-    if (!v || !out) return -1;
-    x = strtod(v, &end);
-    if (end == v) return -1;
-    *out = x;
-    return 0;
-}
 
 typedef enum {
     PERIPH_OK = 0,
@@ -831,10 +821,6 @@ static inline uint32_t robot_def_key(platform_family_t platform, uint16_t model,
     return ROBOT_DEF_KEY(platform, model, hat);
 }
 
-static const peripheral_kv_t leds_props[] = {
-    { "pwm_hz", "1000" },
-    { "gamma", "2.2" },
-};
 
 static const peripheral_kv_t imu_props[] = {
     { "accel_range", "1" },
@@ -943,12 +929,10 @@ static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
     {
         .type = PERIPH_LED,
         .name = "leds_front_and_rear",
-        .driver = "pca9685",
+        .driver = "leds_controller",
         .flags = PERIPH_FLAG_NONE,
         .primary = PRI_I2C("/dev/i2c-1", 0x40),
         .num_aux = 0,
-        .props = leds_props,
-        .num_props = (uint16_t)(sizeof(leds_props)/sizeof(leds_props[0])),
     },
     {
         .type = PERIPH_IMU,
@@ -1229,20 +1213,6 @@ FOXY_API void sleep_ms(unsigned ms) {
 #define PCA9685_TICKS_COUNT 4096
 #define PCA9685_TICKS_MAX (PCA9685_TICKS_COUNT - 1)
 
-static uint16_t gamma_lut[256];
-
-static void gamma_init(double gamma) {
-    int i;
-    uint16_t res_12bit = PCA9685_TICKS_MAX;
-    for (i = 0; i < 256; i++) {
-        double x = (double)i / 255.0;
-        double y = pow(x, gamma);
-        long v12 = lround(y * (double)res_12bit);
-        if (v12 < 0) v12 = 0;
-        if (v12 > res_12bit) v12 = res_12bit;
-        gamma_lut[i] = (uint16_t)v12;
-    }
-}
 
 static uint8_t prescale_for_hz(double pwm_hz) {
     double prescale_f = (PCA9685_OSC_HZ / ((double)PCA9685_TICKS_COUNT * pwm_hz)) - 1.0;
@@ -1305,29 +1275,42 @@ static int pca9685_set_pwm(int fd, uint8_t addr7, uint8_t channel, uint16_t on, 
     return i2c_write_reg_bytes(fd, addr7, reg, buf, sizeof(buf));
 }
 
-static uint16_t rgb8_to_12(uint8_t v8) {
-    return gamma_lut[v8];
+
+/* +++++++++++++++++++++++ LEDS CONTROLLER +++++++++++++++++++++++ */
+
+#define LEDS_CONTROLLER_LED0_ON_L 0x06
+#define LEDS_CONTROLLER_LED_COUNT 5
+#define LEDS_CONTROLLER_RGB_CHANNELS 3
+#define LEDS_CONTROLLER_CHANNEL_BYTES 4
+#define LEDS_CONTROLLER_RGB_BYTES (LEDS_CONTROLLER_RGB_CHANNELS * LEDS_CONTROLLER_CHANNEL_BYTES)
+
+static void leds_controller_encode_channel(uint8_t *buf, uint8_t value) {
+    uint16_t off = (uint16_t)(255u - value) << 4;
+
+    buf[0] = 0x00;
+    buf[1] = 0x00;
+    buf[2] = (uint8_t)(off & 0xFFu);
+    buf[3] = (uint8_t)((off >> 8) & 0x0Fu);
 }
 
-static int pca9685_set_rgb(int fd, uint8_t addr7, uint8_t led_index, uint8_t r8, uint8_t g8, uint8_t b8) {
-    uint8_t base = (uint8_t)(led_index * 3);
-    uint16_t r12, g12, b12;
+static int leds_controller_set_rgb_raw(int fd, uint8_t addr7, uint8_t led_index, uint8_t r, uint8_t g, uint8_t b) {
+    uint8_t reg;
+    uint8_t buf[LEDS_CONTROLLER_RGB_BYTES];
 
-    if (base + 2 > 15) {
+    if (led_index >= LEDS_CONTROLLER_LED_COUNT) {
         errno = EINVAL;
         return -1;
     }
 
-    r12 = rgb8_to_12(r8);
-    g12 = rgb8_to_12(g8);
-    b12 = rgb8_to_12(b8);
+    reg = (uint8_t)(LEDS_CONTROLLER_LED0_ON_L + led_index * LEDS_CONTROLLER_RGB_BYTES);
 
-    if (pca9685_set_pwm(fd, addr7, (uint8_t)(base + 0), 0, r12) < 0) return -1;
-    if (pca9685_set_pwm(fd, addr7, (uint8_t)(base + 1), 0, g12) < 0) return -1;
-    if (pca9685_set_pwm(fd, addr7, (uint8_t)(base + 2), 0, b12) < 0) return -1;
+    leds_controller_encode_channel(&buf[0], r);
+    leds_controller_encode_channel(&buf[4], g);
+    leds_controller_encode_channel(&buf[8], b);
 
-    return 0;
+    return i2c_write_reg_bytes(fd, addr7, reg, buf, sizeof(buf));
 }
+
 
 /* ++++++++++++++++++++++++++ MPU6050 ++++++++++++++++++++++++++ */
 
@@ -1823,64 +1806,62 @@ FOXY_API void robot_deinit(robot_t *r) {
  * DRIVER IMPLEMENTATIONS
  * ======================================================================================== */
 
-/* ---------------------- LED (PCA9685) ---------------------- */
+/* ---------------------- LEDS CONTROLLER ---------------------- */
 
 typedef struct {
     int fd;
     uint8_t addr7;
-} pca9685_led_ctx_t;
+} leds_controller_ctx_t;
 
-static int led_pca9685_set_rgb(void *p, uint8_t idx, uint8_t r, uint8_t g, uint8_t b) {
-    pca9685_led_ctx_t *ctx = (pca9685_led_ctx_t *)p;
+static int leds_controller_set_rgb(void *p, uint8_t idx, uint8_t r, uint8_t g, uint8_t b) {
+    leds_controller_ctx_t *ctx = (leds_controller_ctx_t *)p;
+
     if (!ctx) return -EINVAL;
-    if (pca9685_set_rgb(ctx->fd, ctx->addr7, idx, r, g, b) < 0) return -errno;
+    if (leds_controller_set_rgb_raw(ctx->fd, ctx->addr7, idx, r, g, b) < 0) return -errno;
     return 0;
 }
 
-static int led_pca9685_bind(const peripheral_desc_t *desc, void **out_ctx) {
+static int leds_controller_bind(const peripheral_desc_t *desc, void **out_ctx) {
     const char *adapter;
     uint8_t addr7;
-    double pwm_hz = 1000.0;
-    double gamma = 2.2;
+    uint8_t i;
     int fd;
-    pca9685_led_ctx_t *ctx;
-    static bool gamma_inited = false;
+    leds_controller_ctx_t *ctx;
 
     if (!desc || !out_ctx) return -EINVAL;
     if (desc->type != PERIPH_LED) return -EINVAL;
     if (desc->primary.iface != IFACE_I2C) return -EINVAL;
 
     adapter = desc->primary.u.i2c.adapter;
-    addr7   = (uint8_t)(desc->primary.u.i2c.addr & 0x7F);
-
-    (void)peripheral_prop_get_double(desc, "pwm_hz", &pwm_hz);
-    (void)peripheral_prop_get_double(desc, "gamma", &gamma);
+    addr7 = (uint8_t)(desc->primary.u.i2c.addr & 0x7F);
 
     fd = open_i2c_fd(adapter);
     if (fd < 0) return fd;
 
-    if (!gamma_inited) {
-        gamma_init(gamma);
-        gamma_inited = true;
+    for (i = 0; i < LEDS_CONTROLLER_LED_COUNT; i++) {
+        if (leds_controller_set_rgb_raw(fd, addr7, i, 0, 0, 0) < 0) {
+            int e = errno ? -errno : -EIO;
+            close(fd);
+            return e;
+        }
     }
 
-    if (pca9685_init(fd, addr7, pwm_hz) < 0) {
-        int e = errno ? -errno : -EIO;
+    ctx = (leds_controller_ctx_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) {
         close(fd);
-        return e;
+        return -ENOMEM;
     }
-
-    ctx = (pca9685_led_ctx_t *)calloc(1, sizeof(*ctx));
-    if (!ctx) { close(fd); return -ENOMEM; }
 
     ctx->fd = fd;
     ctx->addr7 = addr7;
+
     *out_ctx = ctx;
     return 0;
 }
 
-static void led_pca9685_unbind(void *p) {
-    pca9685_led_ctx_t *ctx = (pca9685_led_ctx_t *)p;
+static void leds_controller_unbind(void *p) {
+    leds_controller_ctx_t *ctx = (leds_controller_ctx_t *)p;
+
     if (!ctx) return;
     if (ctx->fd >= 0) close(ctx->fd);
     free(ctx);
@@ -2385,8 +2366,8 @@ struct led_ops {
     int (*set_rgb)(void *ctx, uint8_t idx, uint8_t r, uint8_t g, uint8_t b);
 };
 
-static const led_ops_t led_pca9685_ops = {
-    .set_rgb = led_pca9685_set_rgb,
+static const led_ops_t leds_controller_ops = {
+    .set_rgb = leds_controller_set_rgb,
 };
 
 FOXY_API int led_set_rgb(led_t led, uint8_t idx, uint8_t r, uint8_t g, uint8_t b) {
@@ -2584,7 +2565,7 @@ FOXY_API void motor_deinit(robot_t *r, motor_t *m) {
 
 // static const peripheral_driver_t 
 const peripheral_driver_t global_drivers[] = {
-    { .name="pca9685",      .type=PERIPH_LED,   .bind=led_pca9685_bind,   .unbind=led_pca9685_unbind, .ops=&led_pca9685_ops },
+    { .name="leds_controller", .type=PERIPH_LED, .bind=leds_controller_bind, .unbind=leds_controller_unbind, .ops=&leds_controller_ops },
     { .name="mpu6050",      .type=PERIPH_IMU,   .bind=imu_mpu6050_bind,   .unbind=imu_mpu6050_unbind, .ops=&imu_mpu6050_ops },
     { .name="gpio",         .type=PERIPH_GPIO,  .bind=gpiochip_line_bind, .unbind=gpiochip_line_unbind, .ops=&gpiochip_line_ops },
     { .name="motor_hbridge",.type=PERIPH_MOTOR, .bind=motor_hbridge_bind, .unbind=motor_hbridge_unbind, .ops=&motor_hbridge_ops },
