@@ -1891,9 +1891,9 @@ static int imu_mpu6050_read(void *p, imu_sample_t *out) {
     out->accel_ms2[1] = si.ay_ms2;
     out->accel_ms2[2] = si.az_ms2;
 
-    out->gyro_dps[0] = si.gx_rads;
-    out->gyro_dps[1] = si.gy_rads;
-    out->gyro_dps[2] = si.gz_rads;
+    out->gyro_rads[0] = si.gx_rads;
+    out->gyro_rads[1] = si.gy_rads;
+    out->gyro_rads[2] = si.gz_rads;
 
     out->mag_uT[0] = 0.0f;
     out->mag_uT[1] = 0.0f;
