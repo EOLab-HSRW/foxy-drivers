@@ -1,5 +1,5 @@
 #define FOXY_IMPLEMENTATION
-#include "foxy.h"
+#include "foxy/foxy.h"
 
 int main(void) {
 
@@ -40,11 +40,11 @@ int main(void) {
     for (size_t i = 0; i < 50; i++) {
         imu_sample_t s = imu_read(imu);
         printf("\tA[ms^2]  %+7.3f %+7.3f %+7.3f |\n"
-               "\tG[deg/s] %+7.2f %+7.2f %+7.2f |\n"
+               "\tG[rad/s] %+7.2f %+7.2f %+7.2f |\n"
                "\tM[uT] %+7.2f %+7.2f %+7.2f |\n"
                "T %.2f C\n",
                 s.accel_ms2[0], s.accel_ms2[1], s.accel_ms2[2],
-                s.gyro_dps[0], s.gyro_dps[1], s.gyro_dps[2],
+                s.gyro_rads[0], s.gyro_rads[1], s.gyro_rads[2],
                 s.mag_uT[0], s.mag_uT[1], s.mag_uT[2],
                 s.temp_c);
         sleep_ms(50);

@@ -135,7 +135,7 @@ typedef resource_t motor_t;
 
 typedef struct {
     float accel_ms2[3];
-    float gyro_dps[3];
+    float gyro_rads[3];
     float mag_uT[3];
     float temp_c;
 } imu_sample_t;
@@ -1359,7 +1359,7 @@ typedef struct {
 typedef struct {
     float ax_g, ay_g, az_g;
     float ax_ms2, ay_ms2, az_ms2;
-    float gx_dps, gy_dps, gz_dps;
+    float gx_rads, gy_rads, gz_rads;
     float temp_c;
 } mpu6050_si_t;
 
@@ -1432,6 +1432,7 @@ static int mpu6050_read_raw(int fd, const mpu6050_t *dev, mpu6050_raw_t *out) {
 
 static void mpu6050_convert_si(const mpu6050_t *dev, const mpu6050_raw_t *raw, mpu6050_si_t *si) {
     const float g = 9.80665f;
+    const float deg_to_rad = 0.01745329252f;
 
     si->ax_g = (float)raw->ax / dev->accel_lsb_per_g;
     si->ay_g = (float)raw->ay / dev->accel_lsb_per_g;
@@ -1441,9 +1442,9 @@ static void mpu6050_convert_si(const mpu6050_t *dev, const mpu6050_raw_t *raw, m
     si->ay_ms2 = si->ay_g * g;
     si->az_ms2 = si->az_g * g;
 
-    si->gx_dps = (float)raw->gx / dev->gyro_lsb_per_dps;
-    si->gy_dps = (float)raw->gy / dev->gyro_lsb_per_dps;
-    si->gz_dps = (float)raw->gz / dev->gyro_lsb_per_dps;
+    si->gx_rads = ((float)raw->gx / dev->gyro_lsb_per_dps) * deg_to_rad;
+    si->gy_rads = ((float)raw->gy / dev->gyro_lsb_per_dps) * deg_to_rad;
+    si->gz_rads = ((float)raw->gz / dev->gyro_lsb_per_dps) * deg_to_rad;
 
     si->temp_c = ((float)raw->temp / 340.0f) + 36.53f;
 }
@@ -1890,9 +1891,9 @@ static int imu_mpu6050_read(void *p, imu_sample_t *out) {
     out->accel_ms2[1] = si.ay_ms2;
     out->accel_ms2[2] = si.az_ms2;
 
-    out->gyro_dps[0] = si.gx_dps;
-    out->gyro_dps[1] = si.gy_dps;
-    out->gyro_dps[2] = si.gz_dps;
+    out->gyro_dps[0] = si.gx_rads;
+    out->gyro_dps[1] = si.gy_rads;
+    out->gyro_dps[2] = si.gz_rads;
 
     out->mag_uT[0] = 0.0f;
     out->mag_uT[1] = 0.0f;
