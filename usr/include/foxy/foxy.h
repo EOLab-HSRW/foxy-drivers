@@ -132,6 +132,7 @@ typedef resource_t led_t;
 typedef resource_t imu_t;
 typedef resource_t gpio_t;
 typedef resource_t motor_t;
+typedef resource_t tof_t;
 
 typedef struct {
     float accel_ms2[3];
@@ -173,6 +174,10 @@ FOXY_API void    motor_deinit(robot_t *r, motor_t *m);
 FOXY_API int     motor_set(motor_t m, float power);
 FOXY_API int     motor_stop(motor_t m);
 FOXY_API int     motor_brake(motor_t m);
+
+FOXY_API tof_t tof_init_name(robot_t *r, const char *name);
+FOXY_API void  tof_deinit(robot_t *r, tof_t *h);
+FOXY_API int   tof_read_mm(tof_t tof);
 
 #ifdef __cplusplus
 } /* extern "C" */
@@ -851,6 +856,13 @@ static const peripheral_kv_t motor_enc_props[] = {
     { "ticks_per_rev", "360" },
 };
 
+static const peripheral_kv_t tof_props[] = {
+    { "io_timeout_ms", "500" },
+    { "timing_budget_us", "33000" },
+    { "signal_rate_limit_mcps_x1000", "250" },
+    { "io_2v8", "1" },
+};
+
 static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
     {
         .type = PERIPH_MOTOR,
@@ -917,6 +929,16 @@ static const peripheral_desc_t jetson_nano_hat_v3_15[] = {
         .num_aux = 0,
         .props = motor_enc_props,
         .num_props = (uint16_t)(sizeof(motor_enc_props)/sizeof(motor_enc_props[0])),
+    },
+    {
+        .type = PERIPH_TOF,
+        .name = "tof0",
+        .driver = "vl53l0x",
+        .flags = PERIPH_FLAG_NONE,
+        .primary = PRI_I2C("/dev/i2c-1", 0x29),
+        .num_aux = 0,
+        .props = tof_props,
+        .num_props = (uint16_t)(sizeof(tof_props)/sizeof(tof_props[0])),
     },
     {
         .type = PERIPH_DISPLAY,
@@ -1449,7 +1471,40 @@ static void mpu6050_convert_si(const mpu6050_t *dev, const mpu6050_raw_t *raw, m
     si->temp_c = ((float)raw->temp / 340.0f) + 36.53f;
 }
 
-/* ++++++++++++++++++++++++++ VL53L0X (partial helpers) ++++++++++++++++++++++++++ */
+/* ++++++++++++++++++++++++++ VL53L0X ++++++++++++++++++++++++++ */
+
+#define VL53L0X_SYSRANGE_START                              0x00
+#define VL53L0X_SYSTEM_SEQUENCE_CONFIG                      0x01
+#define VL53L0X_SYSTEM_INTERMEASUREMENT_PERIOD              0x04
+#define VL53L0X_SYSTEM_INTERRUPT_CONFIG_GPIO                0x0A
+#define VL53L0X_SYSTEM_INTERRUPT_CLEAR                      0x0B
+#define VL53L0X_RESULT_INTERRUPT_STATUS                     0x13
+#define VL53L0X_RESULT_RANGE_STATUS                         0x14
+#define VL53L0X_MSRC_CONFIG_CONTROL                         0x60
+#define VL53L0X_MSRC_CONFIG_TIMEOUT_MACROP                  0x46
+#define VL53L0X_PRE_RANGE_CONFIG_VCSEL_PERIOD               0x50
+
+#define VL53L0X_PRE_RANGE_CONFIG_TIMEOUT_MACROP_HI          0x51
+#define VL53L0X_FINAL_RANGE_CONFIG_MIN_COUNT_RATE_RTN_LIMIT 0x44
+#define VL53L0X_FINAL_RANGE_CONFIG_VCSEL_PERIOD             0x70
+#define VL53L0X_FINAL_RANGE_CONFIG_TIMEOUT_MACROP_HI        0x71
+#define VL53L0X_GLOBAL_CONFIG_SPAD_ENABLES_REF_0            0xB0
+#define VL53L0X_GLOBAL_CONFIG_REF_EN_START_SELECT           0xB6
+#define VL53L0X_DYNAMIC_SPAD_NUM_REQUESTED_REF_SPAD         0x4E
+#define VL53L0X_DYNAMIC_SPAD_REF_EN_START_OFFSET            0x4F
+#define VL53L0X_GPIO_HV_MUX_ACTIVE_HIGH                     0x84
+#define VL53L0X_VHV_CONFIG_PAD_SCL_SDA_EXTSUP_HV            0x89
+#define VL53L0X_IDENTIFICATION_MODEL_ID                     0xC0
+
+#define VL53L0X_MODEL_ID 0xEE
+
+#define VL53L0X_START_OVERHEAD_US       1910u
+#define VL53L0X_END_OVERHEAD_US          960u
+#define VL53L0X_MSRC_OVERHEAD_US         660u
+#define VL53L0X_TCC_OVERHEAD_US          590u
+#define VL53L0X_DSS_OVERHEAD_US          690u
+#define VL53L0X_PRE_RANGE_OVERHEAD_US    660u
+#define VL53L0X_FINAL_RANGE_OVERHEAD_US  550u
 
 typedef struct {
     int fd;
@@ -1459,6 +1514,76 @@ typedef struct {
     uint8_t stop_variable;
     uint32_t measurement_timing_budget_us;
 } vl53l0x_t;
+
+typedef struct {
+    bool tcc;
+    bool dss;
+    bool msrc;
+    bool pre_range;
+    bool final_range;
+} vl53l0x_sequence_enables_t;
+
+typedef struct {
+    uint8_t pre_range_vcsel_period_pclks;
+    uint8_t final_range_vcsel_period_pclks;
+    uint16_t msrc_dss_tcc_mclks;
+    uint16_t pre_range_mclks;
+    uint16_t final_range_mclks;
+    uint32_t msrc_dss_tcc_us;
+    uint32_t pre_range_us;
+    uint32_t final_range_us;
+} vl53l0x_sequence_timeouts_t;
+
+typedef struct {
+    uint8_t reg;
+    uint8_t value;
+} vl53l0x_reg_value_t;
+
+static const vl53l0x_reg_value_t vl53l0x_default_tuning[] = {
+    {0xFF, 0x01}, {0x00, 0x00}, {0xFF, 0x00}, {0x09, 0x00},
+    {0x10, 0x00}, {0x11, 0x00}, {0x24, 0x01}, {0x25, 0xFF},
+    {0x75, 0x00}, {0xFF, 0x01}, {0x4E, 0x2C}, {0x48, 0x00},
+    {0x30, 0x20}, {0xFF, 0x00}, {0x30, 0x09}, {0x54, 0x00},
+    {0x31, 0x04}, {0x32, 0x03}, {0x40, 0x83}, {0x46, 0x25},
+    {0x60, 0x00}, {0x27, 0x00}, {0x50, 0x06}, {0x51, 0x00},
+    {0x52, 0x96}, {0x56, 0x08}, {0x57, 0x30}, {0x61, 0x00},
+    {0x62, 0x00}, {0x64, 0x00}, {0x65, 0x00}, {0x66, 0xA0},
+    {0xFF, 0x01}, {0x22, 0x32}, {0x47, 0x14}, {0x49, 0xFF},
+    {0x4A, 0x00}, {0xFF, 0x00}, {0x7A, 0x0A}, {0x7B, 0x00},
+    {0x78, 0x21}, {0xFF, 0x01}, {0x23, 0x34}, {0x42, 0x00},
+    {0x44, 0xFF}, {0x45, 0x26}, {0x46, 0x05}, {0x40, 0x40},
+    {0x0E, 0x06}, {0x20, 0x1A}, {0x43, 0x40}, {0xFF, 0x00},
+    {0x34, 0x03}, {0x35, 0x44}, {0xFF, 0x01}, {0x31, 0x04},
+    {0x4B, 0x09}, {0x4C, 0x05}, {0x4D, 0x04}, {0xFF, 0x00},
+    {0x44, 0x00}, {0x45, 0x20}, {0x47, 0x08}, {0x48, 0x28},
+    {0x67, 0x00}, {0x70, 0x04}, {0x71, 0x01}, {0x72, 0xFE},
+    {0x76, 0x00}, {0x77, 0x00}, {0xFF, 0x01}, {0x0D, 0x01},
+    {0xFF, 0x00}, {0x80, 0x01}, {0x01, 0xF8}, {0xFF, 0x01},
+    {0x8E, 0x01}, {0x00, 0x01}, {0xFF, 0x00}, {0x80, 0x00},
+};
+
+static int vl53l0x_write_u8(vl53l0x_t *dev, uint8_t reg, uint8_t value) {
+    return i2c_write_reg_u8(dev->fd, dev->addr7, reg, value);
+}
+
+static int vl53l0x_write_u16(vl53l0x_t *dev, uint8_t reg, uint16_t value) {
+    uint8_t buf[2];
+    buf[0] = (uint8_t)(value >> 8);
+    buf[1] = (uint8_t)(value & 0xFFu);
+    return i2c_write_reg_bytes(dev->fd, dev->addr7, reg, buf, sizeof(buf));
+}
+
+static int vl53l0x_read_u8(vl53l0x_t *dev, uint8_t reg, uint8_t *out) {
+    return i2c_read_reg_u8(dev->fd, dev->addr7, reg, out);
+}
+
+static int vl53l0x_read_u16(vl53l0x_t *dev, uint8_t reg, uint16_t *out) {
+    uint8_t buf[2];
+    if (!out) { errno = EINVAL; return -1; }
+    if (i2c_read_reg_bytes(dev->fd, dev->addr7, reg, buf, sizeof(buf)) < 0) return -1;
+    *out = (uint16_t)(((uint16_t)buf[0] << 8) | buf[1]);
+    return 0;
+}
 
 static int poll_timeout(vl53l0x_t *dev, uint64_t start_ms) {
     if (dev->io_timeout_ms <= 0) return 0;
@@ -1478,11 +1603,11 @@ static uint16_t decode_timeout(uint16_t reg_val) {
     return (uint16_t)(((reg_val & 0x00FFu) << ((reg_val & 0xFF00u) >> 8)) + 1u);
 }
 
-static uint16_t encode_timeout(uint16_t timeout_mclks) {
+static uint16_t encode_timeout(uint32_t timeout_mclks) {
     uint32_t ls;
     uint16_t ms = 0;
     if (timeout_mclks == 0) return 0;
-    ls = (uint32_t)timeout_mclks - 1u;
+    ls = timeout_mclks - 1u;
     while (ls > 255u) { ls >>= 1; ms++; }
     return (uint16_t)((ms << 8) | (ls & 0xFFu));
 }
@@ -1501,11 +1626,310 @@ static uint32_t timeout_us_to_mclks(uint32_t timeout_us, uint8_t vcsel_period_pc
     return ((timeout_us * 1000u) + (macro_ns / 2u)) / macro_ns;
 }
 
-static int vl53l0x_set_signal_rate_limit_mcps(int fd, float mcps) {
-    (void)fd;
-    if (mcps < 0.0f) mcps = 0.0f;
-    if (mcps > 511.99f) mcps = 511.99f;
-    return -ENOSYS;
+static int vl53l0x_set_signal_rate_limit_mcps(vl53l0x_t *dev, float mcps) {
+    uint16_t value;
+    if (!dev || mcps < 0.0f || mcps > 511.99f) {
+        errno = EINVAL;
+        return -1;
+    }
+    value = (uint16_t)(mcps * 128.0f + 0.5f);
+    return vl53l0x_write_u16(dev, VL53L0X_FINAL_RANGE_CONFIG_MIN_COUNT_RATE_RTN_LIMIT, value);
+}
+
+static int vl53l0x_get_sequence_enables(vl53l0x_t *dev, vl53l0x_sequence_enables_t *enables) {
+    uint8_t sequence_config;
+    if (!enables) { errno = EINVAL; return -1; }
+    if (vl53l0x_read_u8(dev, VL53L0X_SYSTEM_SEQUENCE_CONFIG, &sequence_config) < 0) return -1;
+    enables->tcc         = ((sequence_config >> 4) & 0x01u) != 0;
+    enables->dss         = ((sequence_config >> 3) & 0x01u) != 0;
+    enables->msrc        = ((sequence_config >> 2) & 0x01u) != 0;
+    enables->pre_range   = ((sequence_config >> 6) & 0x01u) != 0;
+    enables->final_range = ((sequence_config >> 7) & 0x01u) != 0;
+    return 0;
+}
+
+static int vl53l0x_get_sequence_timeouts(vl53l0x_t *dev,
+                                         const vl53l0x_sequence_enables_t *enables,
+                                         vl53l0x_sequence_timeouts_t *timeouts) {
+    uint8_t value8;
+    uint16_t value16;
+
+    if (!enables || !timeouts) { errno = EINVAL; return -1; }
+
+    if (vl53l0x_read_u8(dev, VL53L0X_PRE_RANGE_CONFIG_VCSEL_PERIOD, &value8) < 0) return -1;
+    timeouts->pre_range_vcsel_period_pclks = decode_vcsel_period_pclks(value8);
+
+    if (vl53l0x_read_u8(dev, VL53L0X_MSRC_CONFIG_TIMEOUT_MACROP, &value8) < 0) return -1;
+
+    timeouts->msrc_dss_tcc_mclks = (uint16_t)value8 + 1u;
+    timeouts->msrc_dss_tcc_us = timeout_mclks_to_us(timeouts->msrc_dss_tcc_mclks,
+                                                    timeouts->pre_range_vcsel_period_pclks);
+
+    if (vl53l0x_read_u16(dev, VL53L0X_PRE_RANGE_CONFIG_TIMEOUT_MACROP_HI, &value16) < 0) return -1;
+    timeouts->pre_range_mclks = decode_timeout(value16);
+    timeouts->pre_range_us = timeout_mclks_to_us(timeouts->pre_range_mclks,
+                                                 timeouts->pre_range_vcsel_period_pclks);
+
+    if (vl53l0x_read_u8(dev, VL53L0X_FINAL_RANGE_CONFIG_VCSEL_PERIOD, &value8) < 0) return -1;
+    timeouts->final_range_vcsel_period_pclks = decode_vcsel_period_pclks(value8);
+
+    if (vl53l0x_read_u16(dev, VL53L0X_FINAL_RANGE_CONFIG_TIMEOUT_MACROP_HI, &value16) < 0) return -1;
+    timeouts->final_range_mclks = decode_timeout(value16);
+    if (enables->pre_range) {
+        if (timeouts->final_range_mclks < timeouts->pre_range_mclks) {
+            errno = EIO;
+            return -1;
+        }
+        timeouts->final_range_mclks = (uint16_t)(timeouts->final_range_mclks - timeouts->pre_range_mclks);
+    }
+    timeouts->final_range_us = timeout_mclks_to_us(timeouts->final_range_mclks,
+                                                   timeouts->final_range_vcsel_period_pclks);
+    return 0;
+}
+
+static int vl53l0x_get_measurement_timing_budget_us(vl53l0x_t *dev, uint32_t *out_budget_us) {
+    vl53l0x_sequence_enables_t enables;
+    vl53l0x_sequence_timeouts_t timeouts;
+    uint32_t budget_us = VL53L0X_START_OVERHEAD_US + VL53L0X_END_OVERHEAD_US;
+
+    if (!out_budget_us) { errno = EINVAL; return -1; }
+    if (vl53l0x_get_sequence_enables(dev, &enables) < 0) return -1;
+
+    if (vl53l0x_get_sequence_timeouts(dev, &enables, &timeouts) < 0) return -1;
+
+    if (enables.tcc) budget_us += timeouts.msrc_dss_tcc_us + VL53L0X_TCC_OVERHEAD_US;
+    if (enables.dss) {
+        budget_us += 2u * (timeouts.msrc_dss_tcc_us + VL53L0X_DSS_OVERHEAD_US);
+    } else if (enables.msrc) {
+        budget_us += timeouts.msrc_dss_tcc_us + VL53L0X_MSRC_OVERHEAD_US;
+    }
+    if (enables.pre_range) budget_us += timeouts.pre_range_us + VL53L0X_PRE_RANGE_OVERHEAD_US;
+
+    if (enables.final_range) budget_us += timeouts.final_range_us + VL53L0X_FINAL_RANGE_OVERHEAD_US;
+
+    dev->measurement_timing_budget_us = budget_us;
+    *out_budget_us = budget_us;
+    return 0;
+}
+
+static int vl53l0x_set_measurement_timing_budget_us(vl53l0x_t *dev, uint32_t budget_us) {
+    vl53l0x_sequence_enables_t enables;
+    vl53l0x_sequence_timeouts_t timeouts;
+    uint32_t used_budget_us = VL53L0X_START_OVERHEAD_US + VL53L0X_END_OVERHEAD_US;
+    uint32_t final_range_timeout_us;
+    uint32_t final_range_timeout_mclks;
+
+    if (vl53l0x_get_sequence_enables(dev, &enables) < 0) return -1;
+    if (vl53l0x_get_sequence_timeouts(dev, &enables, &timeouts) < 0) return -1;
+
+    if (enables.tcc) used_budget_us += timeouts.msrc_dss_tcc_us + VL53L0X_TCC_OVERHEAD_US;
+    if (enables.dss) {
+        used_budget_us += 2u * (timeouts.msrc_dss_tcc_us + VL53L0X_DSS_OVERHEAD_US);
+    } else if (enables.msrc) {
+        used_budget_us += timeouts.msrc_dss_tcc_us + VL53L0X_MSRC_OVERHEAD_US;
+    }
+    if (enables.pre_range) used_budget_us += timeouts.pre_range_us + VL53L0X_PRE_RANGE_OVERHEAD_US;
+
+    if (!enables.final_range || used_budget_us + VL53L0X_FINAL_RANGE_OVERHEAD_US > budget_us) {
+        return -1;
+    }
+
+    used_budget_us += VL53L0X_FINAL_RANGE_OVERHEAD_US;
+    final_range_timeout_us = budget_us - used_budget_us;
+    final_range_timeout_mclks = timeout_us_to_mclks(final_range_timeout_us,
+                                                     timeouts.final_range_vcsel_period_pclks);
+    if (enables.pre_range) final_range_timeout_mclks += timeouts.pre_range_mclks;
+
+    if (vl53l0x_write_u16(dev, VL53L0X_FINAL_RANGE_CONFIG_TIMEOUT_MACROP_HI,
+                          encode_timeout(final_range_timeout_mclks)) < 0) return -1;
+
+    dev->measurement_timing_budget_us = budget_us;
+    return 0;
+}
+
+static int vl53l0x_get_spad_info(vl53l0x_t *dev, uint8_t *count, bool *type_is_aperture) {
+    uint8_t value;
+    uint64_t start_ms;
+
+    if (!count || !type_is_aperture) { errno = EINVAL; return -1; }
+
+    if (vl53l0x_write_u8(dev, 0x80, 0x01) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0xFF, 0x01) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x00, 0x00) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0xFF, 0x06) < 0) return -1;
+    if (vl53l0x_read_u8(dev, 0x83, &value) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x83, (uint8_t)(value | 0x04u)) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0xFF, 0x07) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x81, 0x01) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x80, 0x01) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x94, 0x6B) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x83, 0x00) < 0) return -1;
+
+    start_ms = mono_ms();
+    for (;;) {
+        if (vl53l0x_read_u8(dev, 0x83, &value) < 0) return -1;
+        if (value != 0x00) break;
+        if (poll_timeout(dev, start_ms) < 0) return -1;
+    }
+
+    if (vl53l0x_write_u8(dev, 0x83, 0x01) < 0) return -1;
+    if (vl53l0x_read_u8(dev, 0x92, &value) < 0) return -1;
+    *count = (uint8_t)(value & 0x7Fu);
+    *type_is_aperture = ((value >> 7) & 0x01u) != 0;
+
+    if (vl53l0x_write_u8(dev, 0x81, 0x00) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0xFF, 0x06) < 0) return -1;
+    if (vl53l0x_read_u8(dev, 0x83, &value) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x83, (uint8_t)(value & ~0x04u)) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0xFF, 0x01) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x00, 0x01) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0xFF, 0x00) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x80, 0x00) < 0) return -1;
+    return 0;
+}
+
+static int vl53l0x_load_tuning(vl53l0x_t *dev) {
+    size_t i;
+    for (i = 0; i < sizeof(vl53l0x_default_tuning)/sizeof(vl53l0x_default_tuning[0]); i++) {
+        if (vl53l0x_write_u8(dev, vl53l0x_default_tuning[i].reg,
+                             vl53l0x_default_tuning[i].value) < 0) return -1;
+    }
+    return 0;
+}
+
+static int vl53l0x_perform_single_ref_calibration(vl53l0x_t *dev, uint8_t vhv_init_byte) {
+    uint8_t status;
+    uint64_t start_ms;
+
+    if (vl53l0x_write_u8(dev, VL53L0X_SYSRANGE_START, (uint8_t)(0x01u | vhv_init_byte)) < 0) return -1;
+
+    start_ms = mono_ms();
+    for (;;) {
+        if (vl53l0x_read_u8(dev, VL53L0X_RESULT_INTERRUPT_STATUS, &status) < 0) return -1;
+        if ((status & 0x07u) != 0) break;
+        if (poll_timeout(dev, start_ms) < 0) return -1;
+    }
+
+    if (vl53l0x_write_u8(dev, VL53L0X_SYSTEM_INTERRUPT_CLEAR, 0x01) < 0) return -1;
+    return vl53l0x_write_u8(dev, VL53L0X_SYSRANGE_START, 0x00);
+}
+
+static int vl53l0x_init(vl53l0x_t *dev,
+                        bool io_2v8,
+                        float signal_rate_limit_mcps,
+                        uint32_t timing_budget_us) {
+    uint8_t value;
+    uint8_t spad_count;
+    bool spad_type_is_aperture;
+    uint8_t ref_spad_map[6];
+
+    uint8_t first_spad_to_enable;
+    uint8_t spads_enabled = 0;
+    uint8_t i;
+    uint32_t current_budget_us;
+
+    if (!dev) { errno = EINVAL; return -1; }
+    dev->did_timeout = 0;
+
+    if (vl53l0x_read_u8(dev, VL53L0X_IDENTIFICATION_MODEL_ID, &value) < 0) return -1;
+    if (value != VL53L0X_MODEL_ID) { errno = ENODEV; return -1; }
+
+    if (io_2v8) {
+        if (vl53l0x_read_u8(dev, VL53L0X_VHV_CONFIG_PAD_SCL_SDA_EXTSUP_HV, &value) < 0) return -1;
+        if (vl53l0x_write_u8(dev, VL53L0X_VHV_CONFIG_PAD_SCL_SDA_EXTSUP_HV,
+                             (uint8_t)(value | 0x01u)) < 0) return -1;
+    }
+
+    if (vl53l0x_write_u8(dev, 0x88, 0x00) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x80, 0x01) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0xFF, 0x01) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x00, 0x00) < 0) return -1;
+    if (vl53l0x_read_u8(dev, 0x91, &dev->stop_variable) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x00, 0x01) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0xFF, 0x00) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x80, 0x00) < 0) return -1;
+
+    if (vl53l0x_read_u8(dev, VL53L0X_MSRC_CONFIG_CONTROL, &value) < 0) return -1;
+    if (vl53l0x_write_u8(dev, VL53L0X_MSRC_CONFIG_CONTROL, (uint8_t)(value | 0x12u)) < 0) return -1;
+    if (vl53l0x_set_signal_rate_limit_mcps(dev, signal_rate_limit_mcps) < 0) return -1;
+    if (vl53l0x_write_u8(dev, VL53L0X_SYSTEM_SEQUENCE_CONFIG, 0xFF) < 0) return -1;
+
+    if (vl53l0x_get_spad_info(dev, &spad_count, &spad_type_is_aperture) < 0) return -1;
+    if (i2c_read_reg_bytes(dev->fd, dev->addr7, VL53L0X_GLOBAL_CONFIG_SPAD_ENABLES_REF_0,
+                           ref_spad_map, sizeof(ref_spad_map)) < 0) return -1;
+
+    if (vl53l0x_write_u8(dev, 0xFF, 0x01) < 0) return -1;
+    if (vl53l0x_write_u8(dev, VL53L0X_DYNAMIC_SPAD_REF_EN_START_OFFSET, 0x00) < 0) return -1;
+    if (vl53l0x_write_u8(dev, VL53L0X_DYNAMIC_SPAD_NUM_REQUESTED_REF_SPAD, 0x2C) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0xFF, 0x00) < 0) return -1;
+    if (vl53l0x_write_u8(dev, VL53L0X_GLOBAL_CONFIG_REF_EN_START_SELECT, 0xB4) < 0) return -1;
+
+    first_spad_to_enable = spad_type_is_aperture ? 12u : 0u;
+
+    for (i = 0; i < 48u; i++) {
+        if (i < first_spad_to_enable || spads_enabled == spad_count) {
+            ref_spad_map[i / 8u] &= (uint8_t)~(1u << (i % 8u));
+        } else if (((ref_spad_map[i / 8u] >> (i % 8u)) & 0x01u) != 0) {
+            spads_enabled++;
+        }
+    }
+    if (i2c_write_reg_bytes(dev->fd, dev->addr7, VL53L0X_GLOBAL_CONFIG_SPAD_ENABLES_REF_0,
+                            ref_spad_map, sizeof(ref_spad_map)) < 0) return -1;
+
+    if (vl53l0x_load_tuning(dev) < 0) return -1;
+
+    if (vl53l0x_write_u8(dev, VL53L0X_SYSTEM_INTERRUPT_CONFIG_GPIO, 0x04) < 0) return -1;
+    if (vl53l0x_read_u8(dev, VL53L0X_GPIO_HV_MUX_ACTIVE_HIGH, &value) < 0) return -1;
+    if (vl53l0x_write_u8(dev, VL53L0X_GPIO_HV_MUX_ACTIVE_HIGH,
+                         (uint8_t)(value & ~0x10u)) < 0) return -1;
+    if (vl53l0x_write_u8(dev, VL53L0X_SYSTEM_INTERRUPT_CLEAR, 0x01) < 0) return -1;
+
+    if (vl53l0x_get_measurement_timing_budget_us(dev, &current_budget_us) < 0) return -1;
+    if (vl53l0x_write_u8(dev, VL53L0X_SYSTEM_SEQUENCE_CONFIG, 0xE8) < 0) return -1;
+
+    if (timing_budget_us == 0) timing_budget_us = current_budget_us;
+    if (vl53l0x_set_measurement_timing_budget_us(dev, timing_budget_us) < 0) return -1;
+
+    if (vl53l0x_write_u8(dev, VL53L0X_SYSTEM_SEQUENCE_CONFIG, 0x01) < 0) return -1;
+    if (vl53l0x_perform_single_ref_calibration(dev, 0x40) < 0) return -1;
+    if (vl53l0x_write_u8(dev, VL53L0X_SYSTEM_SEQUENCE_CONFIG, 0x02) < 0) return -1;
+    if (vl53l0x_perform_single_ref_calibration(dev, 0x00) < 0) return -1;
+    return vl53l0x_write_u8(dev, VL53L0X_SYSTEM_SEQUENCE_CONFIG, 0xE8);
+}
+
+static int vl53l0x_read_single_mm(vl53l0x_t *dev, uint16_t *out_mm) {
+    uint8_t value;
+    uint64_t start_ms;
+
+    if (!dev || !out_mm) { errno = EINVAL; return -1; }
+    dev->did_timeout = 0;
+
+    if (vl53l0x_write_u8(dev, 0x80, 0x01) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0xFF, 0x01) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x00, 0x00) < 0) return -1;
+
+    if (vl53l0x_write_u8(dev, 0x91, dev->stop_variable) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x00, 0x01) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0xFF, 0x00) < 0) return -1;
+    if (vl53l0x_write_u8(dev, 0x80, 0x00) < 0) return -1;
+    if (vl53l0x_write_u8(dev, VL53L0X_SYSRANGE_START, 0x01) < 0) return -1;
+
+    start_ms = mono_ms();
+    for (;;) {
+        if (vl53l0x_read_u8(dev, VL53L0X_SYSRANGE_START, &value) < 0) return -1;
+        if ((value & 0x01u) == 0) break;
+        if (poll_timeout(dev, start_ms) < 0) return -1;
+    }
+
+    start_ms = mono_ms();
+    for (;;) {
+        if (vl53l0x_read_u8(dev, VL53L0X_RESULT_INTERRUPT_STATUS, &value) < 0) return -1;
+        if ((value & 0x07u) != 0) break;
+        if (poll_timeout(dev, start_ms) < 0) return -1;
+    }
+
+    if (vl53l0x_read_u16(dev, (uint8_t)(VL53L0X_RESULT_RANGE_STATUS + 10u), out_mm) < 0) return -1;
+    return vl53l0x_write_u8(dev, VL53L0X_SYSTEM_INTERRUPT_CLEAR, 0x01);
 }
 
 /* ========================================================================================
@@ -1968,6 +2392,79 @@ static void imu_mpu6050_unbind(void *p) {
     free(ctx);
 }
 
+/* ---------------------- TOF (VL53L0X) ---------------------- */
+
+typedef struct {
+    vl53l0x_t dev;
+} vl53l0x_tof_ctx_t;
+
+static int tof_vl53l0x_read_mm(void *p, uint16_t *out_mm) {
+    vl53l0x_tof_ctx_t *ctx = (vl53l0x_tof_ctx_t *)p;
+    if (!ctx || !out_mm) return -EINVAL;
+    if (vl53l0x_read_single_mm(&ctx->dev, out_mm) < 0) return errno ? -errno : -EIO;
+    return 0;
+}
+
+static int tof_vl53l0x_bind(const peripheral_desc_t *desc, void **out_ctx) {
+    const char *adapter;
+    uint8_t addr7;
+    uint32_t io_timeout_ms = 500;
+    uint32_t timing_budget_us = 33000;
+    uint32_t signal_rate_limit_mcps_x1000 = 250;
+    uint32_t io_2v8 = 1;
+    int fd;
+    vl53l0x_tof_ctx_t *ctx;
+
+    if (!desc || !out_ctx) return -EINVAL;
+    if (desc->type != PERIPH_TOF) return -EINVAL;
+    if (desc->primary.iface != IFACE_I2C) return -EINVAL;
+
+    adapter = desc->primary.u.i2c.adapter;
+    addr7 = (uint8_t)(desc->primary.u.i2c.addr & 0x7F);
+    if (!adapter || !adapter[0]) return -EINVAL;
+
+    (void)peripheral_prop_get_u32(desc, "io_timeout_ms", &io_timeout_ms);
+    (void)peripheral_prop_get_u32(desc, "timing_budget_us", &timing_budget_us);
+    (void)peripheral_prop_get_u32(desc, "signal_rate_limit_mcps_x1000", &signal_rate_limit_mcps_x1000);
+    (void)peripheral_prop_get_u32(desc, "io_2v8", &io_2v8);
+
+    if (io_timeout_ms > 60000u) io_timeout_ms = 60000u;
+    if (signal_rate_limit_mcps_x1000 > 511990u) signal_rate_limit_mcps_x1000 = 511990u;
+
+    fd = open_i2c_fd(adapter);
+    if (fd < 0) return fd;
+
+    ctx = (vl53l0x_tof_ctx_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) { close(fd); return -ENOMEM; }
+
+    ctx->dev.fd = fd;
+    ctx->dev.addr7 = addr7;
+    ctx->dev.io_timeout_ms = (int)io_timeout_ms;
+    ctx->dev.did_timeout = 0;
+    ctx->dev.stop_variable = 0;
+    ctx->dev.measurement_timing_budget_us = 0;
+
+    if (vl53l0x_init(&ctx->dev,
+                     io_2v8 != 0,
+                     (float)signal_rate_limit_mcps_x1000 / 1000.0f,
+                     timing_budget_us) < 0) {
+        int e = errno ? -errno : -EIO;
+        close(fd);
+        free(ctx);
+        return e;
+    }
+
+    *out_ctx = ctx;
+    return 0;
+}
+
+static void tof_vl53l0x_unbind(void *p) {
+    vl53l0x_tof_ctx_t *ctx = (vl53l0x_tof_ctx_t *)p;
+    if (!ctx) return;
+    if (ctx->dev.fd >= 0) close(ctx->dev.fd);
+    free(ctx);
+}
+
 /* ---------------------- GPIO (linux gpio chardev v1) ---------------------- */
 
 typedef struct {
@@ -2402,6 +2899,27 @@ FOXY_API imu_sample_t imu_read(imu_t imu) {
     return s;
 }
 
+/* ---------------------- TOF resource ---------------------- */
+
+typedef struct tof_ops tof_ops_t;
+struct tof_ops {
+    int (*read_mm)(void *ctx, uint16_t *out_mm);
+};
+
+static const tof_ops_t tof_vl53l0x_ops = {
+    .read_mm = tof_vl53l0x_read_mm,
+};
+
+FOXY_API int tof_read_mm(tof_t tof) {
+    const tof_ops_t *ops = (const tof_ops_t *)tof.ops;
+    uint16_t mm = 0;
+    int rc;
+    if (!ops || !ops->read_mm || !tof.ctx) return -ENODEV;
+    rc = ops->read_mm(tof.ctx, &mm);
+    if (rc < 0) return rc;
+    return (int)mm;
+}
+
 /* ---------------------- GPIO resource ---------------------- */
 
 typedef struct gpio_ops gpio_ops_t;
@@ -2560,6 +3078,14 @@ FOXY_API void motor_deinit(robot_t *r, motor_t *m) {
     resource_close(r, m);
 }
 
+FOXY_API tof_t tof_init_name(robot_t *r, const char *name) {
+    return resource_open(r, PERIPH_TOF, name, "tof_init");
+}
+
+FOXY_API void tof_deinit(robot_t *r, tof_t *h) {
+    resource_close(r, h);
+}
+
 /* ========================================================================================
  * DRIVERS REGISTRY
  * ======================================================================================== */
@@ -2568,6 +3094,7 @@ FOXY_API void motor_deinit(robot_t *r, motor_t *m) {
 const peripheral_driver_t global_drivers[] = {
     { .name="leds_controller", .type=PERIPH_LED, .bind=leds_controller_bind, .unbind=leds_controller_unbind, .ops=&leds_controller_ops },
     { .name="mpu6050",      .type=PERIPH_IMU,   .bind=imu_mpu6050_bind,   .unbind=imu_mpu6050_unbind, .ops=&imu_mpu6050_ops },
+    { .name="vl53l0x",      .type=PERIPH_TOF,   .bind=tof_vl53l0x_bind,   .unbind=tof_vl53l0x_unbind, .ops=&tof_vl53l0x_ops },
     { .name="gpio",         .type=PERIPH_GPIO,  .bind=gpiochip_line_bind, .unbind=gpiochip_line_unbind, .ops=&gpiochip_line_ops },
     { .name="motor_hbridge",.type=PERIPH_MOTOR, .bind=motor_hbridge_bind, .unbind=motor_hbridge_unbind, .ops=&motor_hbridge_ops },
 };

@@ -1,3 +1,9 @@
+foxy-drivers (1.0.7-0) jammy; urgency=medium
+
+  * Feature: add hardware support for the vl53l0x tof sensor
+
+ -- Harley Lara <contact@harleylara.com>  Sun, 19 Jul 2026 12:04:00 +0000
+
 foxy-drivers (1.0.6-0) jammy; urgency=medium
 
   * Change: read gyro values and convert to rad/s
