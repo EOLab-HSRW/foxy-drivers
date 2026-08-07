@@ -1,3 +1,9 @@
+foxy-drivers (1.0.8-0) jammy; urgency=medium
+
+  * Feature: add service for bringup robot
+
+ -- Harley Lara <contact@harleylara.com>  Sun, 07 Aug 2026 07:34:00 +0000
+
 foxy-drivers (1.0.7-0) jammy; urgency=medium
 
   * Feature: add hardware support for the vl53l0x tof sensor

@@ -11,6 +11,7 @@ Low-level drivers and daemon helpers for Foxy robot hardware.
 - `/usr/local/sbin/foxy-hat-enable` — HAT GPIO mapping helper.
 - `foxy-hat-enable.service` — enables the HAT mapping before `batteryd.service`.
 - `batteryd.service` — publishes `/run/batteryd/status` and `/run/batteryd/control.sock`.
+- `foxy-bringup.service` — starts the ROS 2 hardware bringup in the `bringup` tmux session.
 
 ## HAT GPIO enable logic
 

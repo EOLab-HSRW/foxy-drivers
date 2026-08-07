@@ -2,6 +2,7 @@ usr/include/foxy/foxy.h usr/include/foxy
 usr/include/foxy/battery.h usr/include/foxy
 usr/sbin/foxy-hat-enable usr/sbin
 etc/systemd/system/foxy-hat-enable.service lib/systemd/system
+etc/systemd/system/foxy-bringup.service lib/systemd/system
 etc/systemd/system/foxy-battery-monitor.service lib/systemd/system
 etc/systemd/system/foxy-poweroff.service lib/systemd/system
 etc/sudoers.d/foxy-drivers-poweroff etc/sudoers.d

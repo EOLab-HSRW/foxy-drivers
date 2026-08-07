@@ -1,0 +1,25 @@
+[Unit]
+Description=Foxy ROS 2 hardware bringup
+After=foxy-hat-enable.service
+Requires=foxy-hat-enable.service
++
+[Service]
+Type=oneshot
+User=foxy
+WorkingDirectory=~
+WorkingDirectory=/home/foxy/foxy_ws
+
+# Start ROS 2 hardware bringup in a detached tmux session.
+# Explicitly source the Foxy workspace before launching.
+ExecStart=/usr/bin/tmux new-session -d -s bringup "/bin/bash -c 'source /home/foxy/foxy_ws/install/setup.bash && exec ros2 launch foxy_bringup start.launch.py system:=hw'"
+
+# Gracefully interrupt ros2 launch, then remove the tmux session.
+ExecStop=-/usr/bin/tmux send-keys -t bringup C-c
+ExecStop=/bin/sleep 2
+ExecStop=-/usr/bin/tmux kill-session -t bringup
+
+RemainAfterExit=yes
+
+
+[Install]
+WantedBy=multi-user.target
