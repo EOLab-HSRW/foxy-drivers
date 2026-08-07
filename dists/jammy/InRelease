@@ -1,0 +1,46 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Architectures: amd64 arm64
+Codename: jammy
+Components: main
+Date: Fri, 07 Aug 2026 05:36:49 +0000
+Description: APT repo for EOLab-HSRW/foxy-drivers
+Label: foxy-drivers
+Origin: EOLab-HSRW
+Suite: jammy
+MD5Sum:
+ c51c9a55aa712fc8a269eecb9dd777e1              200 Release
+ 7eee807cab724e070ef776d8c8727ec5              782 main/binary-amd64/Packages
+ f38adf252a4998e47576e450ab63e489              549 main/binary-amd64/Packages.gz
+ 7eee807cab724e070ef776d8c8727ec5              782 main/binary-arm64/Packages
+ f38adf252a4998e47576e450ab63e489              549 main/binary-arm64/Packages.gz
+SHA1:
+ bb5c275e451ad022e2f644ddfedb5f37bcb7af4d              200 Release
+ 4b8f63916a8f9a016391dd9bb2a358f45c62a67d              782 main/binary-amd64/Packages
+ 36d77e6052796d205dcd1252475b4c1bb638e4fd              549 main/binary-amd64/Packages.gz
+ 4b8f63916a8f9a016391dd9bb2a358f45c62a67d              782 main/binary-arm64/Packages
+ 36d77e6052796d205dcd1252475b4c1bb638e4fd              549 main/binary-arm64/Packages.gz
+SHA256:
+ caf84f23677c90d9daf8f3ca33ba02736a88ffa043e9ea9134ceea2073d8de42              200 Release
+ d1e5fc315f263063259f64456c46fa1972221368234fb3ba6f67586711873fff              782 main/binary-amd64/Packages
+ d193cf9fcfe2fdc74e37edabdebbcdbe1399e11eafa1dfcfd687cc55d8fcd2ef              549 main/binary-amd64/Packages.gz
+ d1e5fc315f263063259f64456c46fa1972221368234fb3ba6f67586711873fff              782 main/binary-arm64/Packages
+ d193cf9fcfe2fdc74e37edabdebbcdbe1399e11eafa1dfcfd687cc55d8fcd2ef              549 main/binary-arm64/Packages.gz
+SHA512:
+ b1cc48db5418b63f974fbd1e909e3b659cf2e3c5569b217e3049c0f66e138f2fb3b3904865ffcec8cb7d15fce07e4a95cdcc97947281da21b3f056afc8e9c7c6              200 Release
+ b0e945bbf714570f3515ea4dee80d60679a70fb8a3f1e781f09b6a26b74a1b0c23b3e2b5750647ebe39e646a29ae26a8b2f95c28003b4faded6063cb9c43685e              782 main/binary-amd64/Packages
+ 1b7987ca91d32d5f5d886834c178c89a3d8f4d599cda5c68ea5b96bec3ee3e886d6f728367ba19b69e13530a47c7617e54a6a8ba70aebfbef1582f1ab4da5ca0              549 main/binary-amd64/Packages.gz
+ b0e945bbf714570f3515ea4dee80d60679a70fb8a3f1e781f09b6a26b74a1b0c23b3e2b5750647ebe39e646a29ae26a8b2f95c28003b4faded6063cb9c43685e              782 main/binary-arm64/Packages
+ 1b7987ca91d32d5f5d886834c178c89a3d8f4d599cda5c68ea5b96bec3ee3e886d6f728367ba19b69e13530a47c7617e54a6a8ba70aebfbef1582f1ab4da5ca0              549 main/binary-arm64/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iQEzBAEBCgAdFiEErODy6zn86qlZ/w9h6oNx8Bq5NiEFAmp1bvEACgkQ6oNx8Bq5
+NiH/NwgAvFq6g4Xy2wOvmd1cxbtYsfm7rmpLnzd6Cm3XNpMTV6NUYm+N+b+XtYrf
+c8kebqW5OG+bxfty5SgcnBdxPqhwS8o6zXOquKmuEcv0oy8VDDIVRjh3HETroYjC
++Rtkc5u5c4SVuJfwCzdyWRJdYhbJwcxvvSeSDz+mil9Aui+pwGgNCH61KYoWB3I2
++oKzuR+cxM+UxzuYFiLNr6Nub9r2xzHtHmLUGyMpAxnQ+wUysyZRXoe8uTm86DIK
+SakvT0kVS+lHYDDGvtDAXw411QEEyVh7pxo+vrrmiigZ/UuCh8O5hr8m4MCezcI+
+JxPseHzE4WRSHINlHHcGgxUj8qadFQ==
+=IyAn
+-----END PGP SIGNATURE-----

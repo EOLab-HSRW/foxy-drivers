@@ -1,0 +1,20 @@
+Package: foxy-drivers
+Version: 1.0.8-0
+Architecture: all
+Maintainer: Harley Lara <contact@harleylara.com>
+Installed-Size: 197
+Depends: bash, python3, adduser, udev, sudo, tmux
+Recommends: build-essential, linux-libc-dev
+Filename: pool/main/foxy-drivers_1.0.8-0_all.deb
+Size: 37556
+MD5sum: 131745e44df9c3a93a8fdd8964d2723e
+SHA1: c969e5b7191e38d20bd8346dde49294dc42a0997
+SHA256: 0ef84b85f4c15c85299c302a493ea2ab13a3864a7007effa0dfd3d0455836ae6
+Section: admin
+Priority: optional
+Homepage: https://github.com/EOLab-HSRW/foxy-drivers
+Description: Low-level Foxy robot hardware drivers
+ Installs the Foxy single-header C driver, the batteryd daemon/client header,
+ and the systemd units used to enable the Foxy HAT GPIO mapping and publish
+ battery status/control through /run/batteryd.
+
